@@ -16,5 +16,5 @@ python-libnmap = "*"
 termcolor = "*"
 netaddr = "*"
 ipython = "*"
-http = "*"
-pymetasploit = {git = "https://github.com/danmcinerney/pymetasploit"}
+requests = "*"
+msgpack = "*"

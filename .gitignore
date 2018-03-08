@@ -1,0 +1,6 @@
+*.txt
+*.gnmap
+*.nmap
+*.xml
+*.pyc
+*.lock
