@@ -143,7 +143,10 @@ def get_hosts(report):
             print_info('Host up: {}'.format(ip))
             for s in host.services:
                 if s.open():
-                    banner = s.banner.split('product: ')[1]
+                    if 'product: ' in s.banner:
+                        banner = s.banner.split('product: ')[1]
+                    else:
+                        banner = s.banner
                     port = str(s.port)
                     print '          {} - {}'.format(port, banner)
                     port_banner = [(port, banner)]
@@ -257,7 +260,6 @@ def main(report, args):
     # these are in format {ip:[ms08-nse, ms17-nse]}
     smb_vuln_hosts = get_smb_vuln_hosts(report)
 
-
     # initialize keep alive process
     p = Thread(target=keep_alive, args=(args,))
     p.start()
@@ -284,5 +286,3 @@ if __name__ == "__main__":
         sys.exit()
     report = parse_nmap(args)
     main(report, args)
-
-
