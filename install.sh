@@ -1,6 +1,6 @@
 apt-get update
 apt-get install git python-pip
-pip2 install pipenv
+pip install pipenv
 pipenv install --two
 echo '[*] Run metasploit in a new terminal using the included rc file:'
 echo '      sudo msfconsole -r msfrpc.rc'
