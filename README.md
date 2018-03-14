@@ -1,4 +1,4 @@
-# msf-autopwn
+msf-autopwn
 ------
 Performs or reads an Nmap scan then automatically exploits machines that contain some of the most common vulnerabilities.
 
