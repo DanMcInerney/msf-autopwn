@@ -451,5 +451,3 @@ if __name__ == "__main__":
 
 #TODO
 # Add JBoss, Struts, Tomcat, Jenkins, WebSphere
-# Why are named pipes printing twice?
-# Why can't I accurately read module output?
