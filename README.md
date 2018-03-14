@@ -34,26 +34,25 @@ Working modules:
 
 Future additional modules:
 * Jenkins
-** Find with nmap service output
-** exploit/linux/misc/jenkins_java_deserialize
+  * Find with nmap service output
+  * exploit/linux/misc/jenkins_java_deserialize
 
 * Websphere
-** Find with nmap service output
-** exploit/windows/misc/ibm_websphere_java_deserialize
+  * Find with nmap service output
+  * exploit/windows/misc/ibm_websphere_java_deserialize
 
 * Tomcat
-** Find with nmap service output
-** exploit/multi/http/tomcat_jsp_upload_bypass
-** exploit/multi/http/tomcat_mgr_deploy
-** exploit/multi/http/tomcat_mgr_upload
+  * Find with nmap service output
+  * exploit/multi/http/tomcat_jsp_upload_bypass
+  * exploit/multi/http/tomcat_mgr_deploy
+  * exploit/multi/http/tomcat_mgr_upload
 
 * JBoss
-** Find with nmap service output
-** exploit/multi/http/jboss_bshdeployer
-** exploit/multi/http/jboss_invoke_deploy
+  * Find with nmap service output
+  * exploit/multi/http/jboss_bshdeployer
+  * exploit/multi/http/jboss_invoke_deploy
 
 * Struts
-** Find with nmap service output
-** exploit/multi/http/struts2_content_type_ognl
-** exploit/multi/http/struts2_rest_xstream
-
+  * Find with nmap service output
+  * exploit/multi/http/struts2_content_type_ognl
+  * exploit/multi/http/struts2_rest_xstream
