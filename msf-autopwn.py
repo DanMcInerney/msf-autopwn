@@ -376,8 +376,10 @@ def check_vuln(c_id):
     return False
 
 def run_nessus_exploits(c_id, exploits):
-    pass
-
+    for mod in exploits:
+        for ip,port in exploits[mod]:
+            cmd = create_msf_cmd(path, rhost_var, ip, port, payload, opts)
+            CLIENT.call('console.write', [c_id, cmd])
 
 def run_nmap_exploits(c_id, hosts):
     '''
@@ -538,6 +540,7 @@ def main(report, args):
         # exploits = {'msf_module_name':[(ip, port), (ip, port)]
         exploits = parse_nessus(args)
         run_nessus_exploits(c_id, exploits)
+        remainder_output = wait_on_busy_console(c_id)
     else:
         # hosts = {ip : [(port, banner), (port2, banner2)]
         hosts = get_hosts(report)
