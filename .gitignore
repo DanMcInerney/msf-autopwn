@@ -4,3 +4,4 @@
 *.xml
 *.pyc
 *.lock
+*.nessus

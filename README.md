@@ -30,6 +30,7 @@ Working modules:
 * exploit/windows/smb/ms08_067_netapi
 * exploit/windows/smb/ms17_010_psexec
 * exploit/windows/smb/ms17_010_eternalblue
+* exploit/multi/http/struts_dmi_rest_exec
 
 Future additional modules:
 * Jenkins
