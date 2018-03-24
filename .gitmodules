@@ -1,0 +1,3 @@
+[submodule "msfrpc"]
+	path = msfrpc
+	url = https://github.com/DanMcInerney/msfrpc

@@ -8,8 +8,8 @@ This install is only tested on Kali. Clone into the repo, enter the cloned folde
 ```
 git clone https://github.com/DanMcInerney/msf-autopwn
 cd msf-autopwn
-./install.sh
 In a new terminal: msfconsole -r msfrpc.rc
+pipenv install --three
 pipenv shell
 cd msfrpc && python2 setup install && cd ..
 ```
@@ -28,7 +28,9 @@ Parse an Nmap XML file and connect to the msfrpc server using the username user1
 Parse Nessus file for vulnerabilities with Metasploit modules and run them.
 
 #### Details
-Runs an Nmap scan ```nmap -sS -O -T4 -sV -n --max-retries 5 --script smb-vuln-ms17-010,smb-vuln-ms08-067 -oA autopwn-scan``` then parses the output for vulnerable machines. The vulnerabilities it currently looks for are MS17-010 (EternalSynergy/Romance if possible, EternalBlue if not) and MS08-067. Prints the live Metasploit output. Any sessions gained will be accessible via the msfconsole terminal you started before running msf-autopwn. The modules chosen are only the most commonly seen based on group experience. If you wish to suggest other modules that you've commonly seen on internal networks I welcome you to open an issue.
+Takes a list of hosts, an Nmap XML file, or a Nessus .nessus file and exploits vulnerable hosts via Metasploit. If given a hostlist, msf-autopwn will run an Nmap scan ```nmap -sS -O -T4 -sV -n --max-retries 5 -oA autopwn-scan``` then parses the output for vulnerable machines. 
+
+Prints the live Metasploit output. Any sessions gained will be accessible via the msfconsole terminal you started before running msf-autopwn. The modules chosen are only the most commonly seen based on group experience. If you wish to suggest other modules that you've commonly seen on internal networks I welcome you to open an issue.
 
 Working modules:
 * exploit/windows/smb/ms08_067_netapi
