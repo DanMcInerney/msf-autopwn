@@ -660,5 +660,5 @@ if __name__ == "__main__":
 
 #TODO
 # Make Nmap smarter so it only runs NSE scripts that haven't already been ran
-# Add tomcat_enum parser
+# Add nmap http-title reader to determine if tomcat is vuln version
 # Add JBoss, Struts, Tomcat, Jenkins, WebSphere
