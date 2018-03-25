@@ -190,10 +190,11 @@ def get_hosts(report, nse):
                         print('          {} - {}'.format(port, banner))
 
 
-    if nse == False:
-        if len(hosts) == 0:
-            print_bad('No hosts found')
-            sys.exit()
+    if len(hosts) == 0:
+        if nse == True:
+            msg = 'NSE '
+        print_bad('No {}hosts found'.format(msg))
+        sys.exit()
 
     return hosts
 
