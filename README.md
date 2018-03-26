@@ -1,6 +1,6 @@
 msf-autopwn
 ------
-Performs or reads an Nmap scan then automatically exploits machines that contain some of the most common vulnerabilities.
+Parses Nessus or Nmap scans and autopwns everything.
 
 #### Installation
 This install is only tested on Kali. Clone into the repo, enter the cloned folder and run install.sh. Open a new terminal and start metasploit with the included rc file. Back in the original terminal continue by entering the newly-created virtual environment with pipenv. Finally, enter the included msfrpc/ folder and install it now that you're inside the virtual environment.
@@ -30,6 +30,12 @@ Parse Nessus file for vulnerabilities with Metasploit modules and run them.
 #### Details
 Takes a list of hosts, an Nmap XML file, or a Nessus .nessus file and exploits vulnerable hosts via Metasploit. If given a hostlist, msf-autopwn will run an Nmap scan ```nmap -sS -O -T4 -sV -n --max-retries 5 -oA autopwn-scan``` then parses the output for vulnerable machines. 
 
+When parsing .nessus scans, the script will find any high risk vulnerabilties and parse out the Metasploit module name from the plugin. It will then run the module against the server. 
+
+When parsing Nmap .xml scans, it reads the service banner and performs any NSE scripts that might help identify the version better. Then it runs any relevant modules against the server and port.
+
+When it runs Metasploit modules it will first run the command ```check``` to see if the server is exploitable. If check explicity says the server isn't vulnerable the script will skip that exploit. If there's any uncertainty at all in check's output then the exploit is performed.
+
 Prints the live Metasploit output. Any sessions gained will be accessible via the msfconsole terminal you started before running msf-autopwn. The modules chosen are only the most commonly seen based on group experience. If you wish to suggest other modules that you've commonly seen on internal networks I welcome you to open an issue.
 
 Working modules:
@@ -37,28 +43,20 @@ Working modules:
 * exploit/windows/smb/ms17_010_psexec
 * exploit/windows/smb/ms17_010_eternalblue
 * exploit/multi/http/struts_dmi_rest_exec
+* exploit/multi/http/tomcat_jsp_upload_bypass
+* exploit/multi/http/tomcat_mgr_upload
 
-Future additional modules:
+Future additional modules for Nmap scans:
 * Jenkins
-  * Find with nmap service output
   * exploit/linux/misc/jenkins_java_deserialize
 
 * Websphere
-  * Find with nmap service output
   * exploit/windows/misc/ibm_websphere_java_deserialize
 
-* Tomcat
-  * Find with nmap service output
-  * exploit/multi/http/tomcat_jsp_upload_bypass
-  * exploit/multi/http/tomcat_mgr_deploy
-  * exploit/multi/http/tomcat_mgr_upload
-
 * JBoss
-  * Find with nmap service output
   * exploit/multi/http/jboss_bshdeployer
   * exploit/multi/http/jboss_invoke_deploy
 
 * Struts
-  * Find with nmap service output
   * exploit/multi/http/struts2_content_type_ognl
   * exploit/multi/http/struts2_rest_xstream
