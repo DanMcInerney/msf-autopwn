@@ -384,6 +384,10 @@ def check_vuln(c_id):
     return False
 
 def run_nessus_exploits(c_id, exploits):
+    '''
+    Matches metasploit module description from Nessus output to the
+    actual module path. Doesn't do aux (so no DOS), just exploits
+    '''
     # There might be a better way to do this but idk it
     # The way MSF search works is with an OR in between words even wrapped in quotes
     # ... dumb.
