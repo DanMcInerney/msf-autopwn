@@ -179,12 +179,21 @@ def get_nmap_os(host):
     '''
     Gets Nmap's guess of OS
     '''
-    nmap_os_raw = host.os_class_probabilities()
-    if len(nmap_os_raw) > 0:
-        nmap_os = str(nmap_os_raw[0]).split(':')[1].split('\r\n')[0].strip()
-    else:
-        # Default to Windows
-        nmap_os = 'Nmap unable to guess OS; defaulting to Windows'
+    nmap_os = None
+
+    for s in host.services:
+        if 'ostype' in s._service:
+            nmap_os = s._service['ostype']
+
+    if not nmap_os:
+
+        nmap_os_raw = host.os_class_probabilities()
+        if len(nmap_os_raw) > 0:
+            nmap_os = str(nmap_os_raw[0]).split(':')[1].split('\r\n')[0].strip()
+        else:
+            # Default to Windows
+            nmap_os = 'Nmap unable to guess OS; defaulting to Windows'
+
     return nmap_os
 
 def get_hosts(report, nse):
@@ -238,6 +247,7 @@ def check_named_pipes(c_id, ip, os_type):
     mod = 'auxiliary/scanner/smb/pipe_auditor'
     extra_opts = ''
     check = False
+    port = '445'
     mod_out = run_msf_module(c_id, ip, mod, port, extra_opts, check, os_type)
 
     # Example output:
