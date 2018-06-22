@@ -22,7 +22,7 @@ def parse_args():
     # Create the arguments
     parser = argparse.ArgumentParser()
     parser.add_argument("-l", "--hostlist", help="Host list file")
-    parser.add_argument("-p", "--password", default='Au70PwN', help="Password for msfrpc")
+    parser.add_argument("-p", "--password", default='123', help="Password for msfrpc")
     parser.add_argument("-u", "--username", default='msf', help="Username for msfrpc")
     parser.add_argument("-x", "--xml", help="Nmap XML file")
     parser.add_argument("-n", "--nessus", help="Nessus .nessus file")
@@ -741,7 +741,10 @@ def main(report, args):
     global CLIENT
 
     # Authenticate and grab a permanent token
-    CLIENT.login(args.username, args.password)
+    try:
+        CLIENT.login(args.username, args.password)
+    except:
+        print_bad('Failed to connect to MSF RPC server. Are you sure you have the right password?')
     CLIENT.call('auth.token_add', ['Au70PwN'])
     CLIENT.token = 'Au70PwN'
 
